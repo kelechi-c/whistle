@@ -72,7 +72,7 @@ def benchmark_audio_loading(path: str) -> dict[str, float]:
         results["torchcodec_load+resample"] = t1 - t0
         results["torchcodec_duration_sec"] = len(audio_tc) / SAMPLE_RATE
     except Exception as e:
-        print(f"  warning: torchcodec benchmark failed ({e})")
+        print(f"warning: torchcodec benchmark failed ({e})")
         results["torchcodec_load+resample"] = None
         results["torchcodec_duration_sec"] = None
 
@@ -101,7 +101,7 @@ def benchmark_inference(
     timings: dict[str, float] = {}
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-    print(f"  loading model {model_path} ...", end=" ", flush=True)
+    print(f"loading model {model_path} ...", end=" ", flush=True)
     t0 = time.perf_counter()
     asr = Qwen3ASRModel.from_pretrained(
         model_path,
@@ -116,21 +116,21 @@ def benchmark_inference(
     # normalize audio
     from qwen_asr.inference.utils import normalize_audio_input
 
-    print("  normalizing audio ...", end=" ", flush=True)
+    print("normalizing audio ...", end=" ", flush=True)
     t0 = time.perf_counter()
     wav_np = normalize_audio_input(wav)
     timings["audio_normalize"] = time.perf_counter() - t0
     print(f"done in {timings['audio_normalize']:.3f}s")
 
     # modular breakdown: build text prompt
-    print("  building prompt ...", end=" ", flush=True)
+    print("building prompt ...", end=" ", flush=True)
     t0 = time.perf_counter()
     texts = [asr._build_text_prompt(context=context, force_language=language)]
     timings["build_prompt"] = time.perf_counter() - t0
     print(f"done in {timings['build_prompt']:.4f}s")
 
     # modular: processor (feature extraction + tokenization)
-    print("  processor encode ...", end=" ", flush=True)
+    print("processor encode ...", end=" ", flush=True)
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     t0 = time.perf_counter()
     inputs = asr.processor(text=texts, audio=[wav_np], return_tensors="pt", padding=True)
@@ -140,7 +140,7 @@ def benchmark_inference(
     print(f"done in {timings['processor_encode']:.3f}s")
 
     # modular: model.generate
-    print(f"  model generate (max_new={max_new_tokens}) ...", end=" ", flush=True)
+    print(f"model generate (max_new={max_new_tokens}) ...", end=" ", flush=True)
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     t0 = time.perf_counter()
     text_ids = asr.model.generate(**inputs, max_new_tokens=max_new_tokens)
@@ -149,7 +149,7 @@ def benchmark_inference(
     print(f"done in {timings['model_generate']:.3f}s")
 
     # modular: decode
-    print("  decode output ...", end=" ", flush=True)
+    print("decode output ...", end=" ", flush=True)
     t0 = time.perf_counter()
     decoded = asr.processor.batch_decode(
         text_ids.sequences[:, inputs["input_ids"].shape[1] :],
@@ -171,7 +171,7 @@ def benchmark_inference(
     )
 
     # end2end transcribe
-    print("  end2end transcribe ...", end=" ", flush=True)
+    print("end2end transcribe ...", end=" ", flush=True)
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     t0 = time.perf_counter()
     results = asr.transcribe(
@@ -195,10 +195,10 @@ def benchmark_inference(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Qwen3-ASR 0.6B benchmark")
+    parser = argparse.ArgumentParser(description="Qwen3-ASR benchmark")
     parser.add_argument("audio", type=str, help="path to audio file")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3-ASR-0.6B")
-    parser.add_argument("--lang", type=str, default=None, help="force language (e.g. English)")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-ASR-1.7B")
+    parser.add_argument("--lang", type=str, default="English", help="force language")
     parser.add_argument("--context", type=str, default="", help="context/hint text")
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--audio-loading-only", action="store_true", help="only benchmark audio loading")
@@ -212,25 +212,24 @@ def main():
     print("=" * 60)
     print("qwen3-asr 0.6b benchmark")
     print("=" * 60)
-    print(f"  audio: {audio_path}")
-    if args.lang:
-        print(f"  forced language: {args.lang}")
+    print(f"audio: {audio_path}")
+    print(f"language: {args.lang}")
     print()
 
     # --- audio loading benchmarks ---
     print("[audio processing benchmarks]")
     audio_stats = benchmark_audio_loading(audio_path)
-    print(f"  audio duration (librosa):  {audio_stats['librosa_duration_sec']:.2f}s")
-    print(f"  audio duration (torchaud): {audio_stats['torchaudio_duration_sec']:.2f}s")
-    print(f"  audio duration (tc):       {audio_stats['torchcodec_duration_sec']:.2f}s")
+    print(f"audio duration (librosa):  {audio_stats['librosa_duration_sec']:.2f}s")
+    print(f"audio duration (torchaud): {audio_stats['torchaudio_duration_sec']:.2f}s")
+    print(f"audio duration (tc):       {audio_stats['torchcodec_duration_sec']:.2f}s")
     print()
-    print(f"  {'method':<30s} {'time (s)':>10s}")
-    print(f"  {'-'*30} {'-'*10}")
+    print(f"{'method':<30s} {'time (s)':>10s}")
+    print(f"{'-'*30} {'-'*10}")
     for key in ("librosa_load+resample", "torchaudio_load+resample", "torchcodec_load+resample"):
-        print(f"  {key:<30s} {audio_stats[key]:>10.4f}")
+        print(f"{key:<30s} {audio_stats[key]:>10.4f}")
     print()
-    print(f"  librosa vs torchaudio:  max_diff={audio_stats['lib_vs_ta_max_diff']}")
-    print(f"  librosa vs torchcodec:  max_diff={audio_stats['lib_vs_tc_max_diff']}")
+    print(f"librosa vs torchaudio:  max_diff={audio_stats['lib_vs_ta_max_diff']}")
+    print(f"librosa vs torchcodec:  max_diff={audio_stats['lib_vs_tc_max_diff']}")
     print()
 
     if args.audio_loading_only:
@@ -238,7 +237,7 @@ def main():
 
     if not torch.cuda.is_available():
         print("[inference benchmarks] skipping — no GPU detected")
-        print("  run this on your GPU machine for inference benchmarks\n")
+        print("run this on your GPU machine for inference benchmarks\n")
         return
 
     # --- inference benchmarks ---
@@ -253,8 +252,8 @@ def main():
     print()
 
     t = result["timings"]
-    print(f"  {'phase':<30s} {'time (s)':>10s}")
-    print(f"  {'-'*30} {'-'*10}")
+    print(f"{'phase':<30s} {'time (s)':>10s}")
+    print(f"{'-'*30} {'-'*10}")
     for key, label in [
         ("model_load", "model load"),
         ("audio_normalize", "audio normalize"),
@@ -266,21 +265,20 @@ def main():
         ("end2end", "end2end transcribe"),
     ]:
         if key in t:
-            print(f"  {label:<30s} {t[key]:>10.4f}")
+            print(f"{label:<30s} {t[key]:>10.4f}")
 
     print()
-    print(f"  end2end / total_modular ratio:  {t['end2end'] / t['total_modular']:.2f}x")
+    print(f"end2end / total_modular ratio:  {t['end2end'] / t['total_modular']:.2f}x")
     audio_dur = audio_stats["librosa_duration_sec"]
     if t.get("end2end"):
-        print(f"  rtf (audio_dur / end2end):      {audio_dur / t['end2end']:.2f}x")
+        print(f"rtf (audio_dur / end2end):      {audio_dur / t['end2end']:.2f}x")
     print()
 
-    # --- transcript ---
     print("[transcript]")
-    print(f"  detected language: {result['language']!r}")
+    print(f"detected language: {result['language']!r}")
     print()
     for line in result["transcript"].strip().split("\n"):
-        print(f"  {line}")
+        print(f"{line}")
     print()
 
 
