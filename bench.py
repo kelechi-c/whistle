@@ -97,6 +97,7 @@ def benchmark_inference(
     language: str | None = None,
     max_new_tokens: int = 512,
     compile: bool = False,
+    profile: bool = False,
 ) -> dict:
     from qwen_asr import Qwen3ASRModel
 
@@ -157,22 +158,15 @@ def benchmark_inference(
     timings["warmup"] = time.perf_counter() - t0
     print(f"done in {timings['warmup']:.3f}s")
 
-    # modular: audio encoder forward (neural mel -> hidden states)
+    # modular: audio encoder forward (conv stack + 32-layer transformer)
     print("audio encoder ...", end=" ", flush=True)
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     t0 = time.perf_counter()
-    if hasattr(asr.model, "get_encoder"):
-        encoder = asr.model.get_encoder()
-        encoder.eval()
-        encoder_out = encoder(
-            input_features=inputs["input_features"],
-            attention_mask=inputs["feature_attention_mask"],
-        )
-    elif hasattr(asr.model, "encoder"):
-        encoder_out = asr.model.encoder(
-            input_features=inputs["input_features"],
-            attention_mask=inputs["feature_attention_mask"],
-        )
+    encoder = asr.model.thinker.audio_tower
+    encoder_out = encoder(
+        input_features=inputs["input_features"],
+        feature_lens=inputs["feature_attention_mask"].sum(dim=-1).int(),
+    )
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     timings["audio_encoder"] = time.perf_counter() - t0
     print(f"done in {timings['audio_encoder']:.3f}s")
@@ -210,18 +204,37 @@ def benchmark_inference(
     )
 
     # end2end transcribe
-    print("end2end transcribe ...", end=" ", flush=True)
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
-    t0 = time.perf_counter()
-    results = asr.transcribe(
-        audio=wav,
-        context=context,
-        language=language,
-        return_time_stamps=False,
-    )
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
-    timings["end2end"] = time.perf_counter() - t0
-    print(f"done in {timings['end2end']:.3f}s")
+    if profile:
+        import uuid
+        trace_path = f"trace_{uuid.uuid4().hex[:8]}.json"
+        print(f"end2end transcribe (profiling -> {trace_path}) ...", end=" ", flush=True)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+        ) as prof:
+            results = asr.transcribe(
+                audio=wav, context=context, language=language, return_time_stamps=False,
+            )
+        torch.cuda.synchronize()
+        prof.export_chrome_trace(trace_path)
+        timings["end2end"] = time.perf_counter() - t0
+        print(f"done in {timings['end2end']:.3f}s")
+        print(f"trace saved to {trace_path}")
+    else:
+        print("end2end transcribe ...", end=" ", flush=True)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        t0 = time.perf_counter()
+        results = asr.transcribe(
+            audio=wav,
+            context=context,
+            language=language,
+            return_time_stamps=False,
+        )
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        timings["end2end"] = time.perf_counter() - t0
+        print(f"done in {timings['end2end']:.3f}s")
 
     result = results[0]
 
@@ -240,8 +253,9 @@ def benchmark_inference(
 @click.option("--context", default="", help="context/hint text")
 @click.option("--max-new-tokens", default=256, show_default=True)
 @click.option("--compile", is_flag=True, help="torch.compile model")
+@click.option("--profile", is_flag=True, help="save torch profiler trace")
 @click.option("--audio-loading-only", is_flag=True, help="only benchmark audio loading")
-def main(audio, model, lang, context, max_new_tokens, compile, audio_loading_only):
+def main(audio, model, lang, context, max_new_tokens, compile, profile, audio_loading_only):
     audio_path = str(Path(audio).resolve())
 
     print("=" * 60)
@@ -286,6 +300,7 @@ def main(audio, model, lang, context, max_new_tokens, compile, audio_loading_onl
         language=lang,
         max_new_tokens=max_new_tokens,
         compile=compile,
+        profile=profile,
     )
     print()
 
@@ -322,3 +337,7 @@ def main(audio, model, lang, context, max_new_tokens, compile, audio_loading_onl
     for line in result["transcript"].strip().split("\n"):
         print(f"{line}")
     print()
+
+
+if __name__ == "__main__":
+    main()
