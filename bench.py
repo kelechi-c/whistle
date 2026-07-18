@@ -6,9 +6,10 @@ Usage:
     uv run --no-sync python bench.py --audio-loading-only <audio.mp3>
 """
 
-import argparse
 import time
 from pathlib import Path
+
+import click
 
 import numpy as np
 import torch
@@ -95,6 +96,7 @@ def benchmark_inference(
     context: str = "",
     language: str | None = None,
     max_new_tokens: int = 512,
+    compile: bool = False,
 ) -> dict:
     from qwen_asr import Qwen3ASRModel
 
@@ -122,14 +124,14 @@ def benchmark_inference(
     timings["audio_normalize"] = time.perf_counter() - t0
     print(f"done in {timings['audio_normalize']:.3f}s")
 
-    # modular breakdown: build text prompt
+    # build text prompt
     print("building prompt ...", end=" ", flush=True)
     t0 = time.perf_counter()
     texts = [asr._build_text_prompt(context=context, force_language=language)]
     timings["build_prompt"] = time.perf_counter() - t0
     print(f"done in {timings['build_prompt']:.4f}s")
 
-    # modular: processor (feature extraction + tokenization)
+    # processor encode
     print("processor encode ...", end=" ", flush=True)
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     t0 = time.perf_counter()
@@ -139,7 +141,43 @@ def benchmark_inference(
     timings["processor_encode"] = time.perf_counter() - t0
     print(f"done in {timings['processor_encode']:.3f}s")
 
-    # modular: model.generate
+    if compile:
+        print("compiling model ...", end=" ", flush=True)
+        t0 = time.perf_counter()
+        asr.model = torch.compile(asr.model, mode="reduce-overhead")
+        timings["compile"] = time.perf_counter() - t0
+        print(f"done in {timings['compile']:.2f}s")
+
+    # warmup: same audio, short generation to trigger cuda kernel compilation
+    print("warmup ...", end=" ", flush=True)
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    t0 = time.perf_counter()
+    _ = asr.model.generate(**inputs, max_new_tokens=min(32, max_new_tokens))
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    timings["warmup"] = time.perf_counter() - t0
+    print(f"done in {timings['warmup']:.3f}s")
+
+    # modular: audio encoder forward (neural mel -> hidden states)
+    print("audio encoder ...", end=" ", flush=True)
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    t0 = time.perf_counter()
+    if hasattr(asr.model, "get_encoder"):
+        encoder = asr.model.get_encoder()
+        encoder.eval()
+        encoder_out = encoder(
+            input_features=inputs["input_features"],
+            attention_mask=inputs["feature_attention_mask"],
+        )
+    elif hasattr(asr.model, "encoder"):
+        encoder_out = asr.model.encoder(
+            input_features=inputs["input_features"],
+            attention_mask=inputs["feature_attention_mask"],
+        )
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    timings["audio_encoder"] = time.perf_counter() - t0
+    print(f"done in {timings['audio_encoder']:.3f}s")
+
+    # modular: model.generate (encoder + LM decode)
     print(f"model generate (max_new={max_new_tokens}) ...", end=" ", flush=True)
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     t0 = time.perf_counter()
@@ -161,13 +199,14 @@ def benchmark_inference(
 
     raw = decoded[0]
 
-    # parse ASR output
     from qwen_asr.inference.utils import parse_asr_output
 
     lang, transcript = parse_asr_output(raw, user_language=language)
 
+    timings["lm_decode"] = timings["model_generate"] - timings["audio_encoder"]
+
     timings["total_modular"] = sum(
-        timings[k] for k in ("audio_normalize", "build_prompt", "processor_encode", "model_generate", "token_decode")
+        timings[k] for k in ("audio_normalize", "build_prompt", "processor_encode", "audio_encoder", "model_generate", "token_decode")
     )
 
     # end2end transcribe
@@ -194,26 +233,24 @@ def benchmark_inference(
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Qwen3-ASR benchmark")
-    parser.add_argument("audio", type=str, help="path to audio file")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3-ASR-1.7B")
-    parser.add_argument("--lang", type=str, default="English", help="force language")
-    parser.add_argument("--context", type=str, default="", help="context/hint text")
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--audio-loading-only", action="store_true", help="only benchmark audio loading")
-    args = parser.parse_args()
-
-    audio_path = str(Path(args.audio).resolve())
-    if not Path(audio_path).exists():
-        print(f"error: {audio_path} not found")
-        raise SystemExit(1)
+@click.command()
+@click.argument("audio", type=click.Path(exists=True))
+@click.option("--model", default="Qwen/Qwen3-ASR-1.7B", show_default=True)
+@click.option("--lang", default="English", show_default=True, help="force language")
+@click.option("--context", default="", help="context/hint text")
+@click.option("--max-new-tokens", default=256, show_default=True)
+@click.option("--compile", is_flag=True, help="torch.compile model")
+@click.option("--audio-loading-only", is_flag=True, help="only benchmark audio loading")
+def main(audio, model, lang, context, max_new_tokens, compile, audio_loading_only):
+    audio_path = str(Path(audio).resolve())
 
     print("=" * 60)
     print("qwen3-asr 0.6b benchmark")
     print("=" * 60)
     print(f"audio: {audio_path}")
-    print(f"language: {args.lang}")
+    print(f"language: {lang}")
+    if compile:
+        print(f"compile: enabled")
     print()
 
     # --- audio loading benchmarks ---
@@ -232,7 +269,7 @@ def main():
     print(f"librosa vs torchcodec:  max_diff={audio_stats['lib_vs_tc_max_diff']}")
     print()
 
-    if args.audio_loading_only:
+    if audio_loading_only:
         return
 
     if not torch.cuda.is_available():
@@ -243,11 +280,12 @@ def main():
     # --- inference benchmarks ---
     print("[inference benchmarks]")
     result = benchmark_inference(
-        model_path=args.model,
+        model_path=model,
         wav=audio_path,
-        context=args.context,
-        language=args.lang,
-        max_new_tokens=args.max_new_tokens,
+        context=context,
+        language=lang,
+        max_new_tokens=max_new_tokens,
+        compile=compile,
     )
     print()
 
@@ -256,9 +294,13 @@ def main():
     print(f"{'-'*30} {'-'*10}")
     for key, label in [
         ("model_load", "model load"),
+        ("compile", "compile"),
+        ("warmup", "warmup"),
         ("audio_normalize", "audio normalize"),
         ("build_prompt", "build prompt"),
         ("processor_encode", "processor encode"),
+        ("audio_encoder", "audio encoder"),
+        ("lm_decode", "lm decode"),
         ("model_generate", "model generate"),
         ("token_decode", "token decode"),
         ("total_modular", "total (modular)"),
@@ -280,7 +322,3 @@ def main():
     for line in result["transcript"].strip().split("\n"):
         print(f"{line}")
     print()
-
-
-if __name__ == "__main__":
-    main()
