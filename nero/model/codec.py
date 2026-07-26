@@ -1,26 +1,21 @@
-"""Tiny learned codec decoder used by the CPU fixture."""
+"""Thin wrapper around the installed official Qwen3-TTS 12 Hz decoder."""
 
-import torch
-from torch import nn
+from dataclasses import asdict
 
-from nero.model.types import ModelConfig
+from qwen_tts.core.tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import (
+    Qwen3TTSTokenizerV2DecoderConfig,
+)
+from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import (
+    Qwen3TTSTokenizerV2Decoder as CodecDecoder,
+)
+
+from nero.model.types import CodecConfig
 
 
-class CodecDecoder(nn.Module):
-    """Maps each multi-codebook frame directly to a short waveform segment."""
+def create_codec_decoder(config: CodecConfig) -> CodecDecoder:
+    """Instantiates the official decoder with Nero's immutable config."""
+    official_config = Qwen3TTSTokenizerV2DecoderConfig(**asdict(config))
+    return CodecDecoder(official_config)
 
-    def __init__(self, config: ModelConfig) -> None:
-        super().__init__()
-        self.embeddings = nn.ModuleList(
-            nn.Embedding(config.codec_vocab_size, config.hidden_size)
-            for _ in range(config.codebooks)
-        )
-        self.waveform_head = nn.Linear(config.hidden_size, config.samples_per_frame)
 
-    def forward(self, codes: torch.Tensor) -> torch.Tensor:
-        """Decodes `(batch, frames, codebooks)` token IDs into mono audio."""
-        hidden = sum(
-            embedding(codes[..., index])
-            for index, embedding in enumerate(self.embeddings)
-        )
-        return self.waveform_head(hidden).tanh().flatten(1)
+__all__ = ["CodecDecoder", "create_codec_decoder"]
