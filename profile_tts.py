@@ -106,14 +106,86 @@ class OfficialPhaseRecorder(AbstractContextManager["OfficialPhaseRecorder"]):
         }
 
 
+def _official_modular_phases(
+    inclusive: dict[str, float], wall_seconds: float
+) -> dict[str, float]:
+    """Converts nested official timings into non-overlapping wall-time phases."""
+    talker_total = inclusive.get("talker", 0.0)
+    predictor = inclusive.get("code_predictor", 0.0)
+    codec = inclusive.get("codec", 0.0)
+    return {
+        "talker_excluding_code_predictor": max(0.0, talker_total - predictor),
+        "code_predictor": predictor,
+        "codec": codec,
+        "wrapper_overhead": max(0.0, wall_seconds - talker_total - codec),
+    }
+
+
 def _load_nero(
-    checkpoint: pl.Path, text: str
+    checkpoint: str | None,
+    text: str,
+    language: str,
+    speaker: str,
+    max_new_tokens: int,
 ) -> tuple[Generate, torch.device, float, AbstractContextManager[Any]]:
-    """Loads the local checkpoint and returns its normalized generation closure."""
+    """Loads a Nero fixture or weight-compatible CustomVoice checkpoint."""
     device = RUNTIME.resolved_device()
+    path = pl.Path(checkpoint) if checkpoint is not None else RUNTIME.checkpoint
+    nero_weights = path / "model.pt"
+    is_fixture = nero_weights.is_file() or (
+        checkpoint is None and not RUNTIME.checkpoint.exists()
+    )
+
+    if not is_fixture:
+        is_hugging_face_id = checkpoint is not None and "/" in checkpoint
+        is_hugging_face_dir = (
+            path.is_dir()
+            and (path / "config.json").is_file()
+            and (path / "model.safetensors").is_file()
+        )
+        if not is_hugging_face_id and not is_hugging_face_dir:
+            raise click.ClickException(
+                f"{path} is neither a Nero checkpoint nor a Hugging Face "
+                "CustomVoice checkpoint"
+            )
+        from nero.model.custom_voice import Qwen3CustomVoice
+
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        start = time.perf_counter()
+        model = Qwen3CustomVoice.from_pretrained(
+            checkpoint or path,
+            device=device,
+            dtype=dtype,
+            attn_implementation="sdpa",
+        )
+        _synchronize(device)
+        load_seconds = time.perf_counter() - start
+        recorder = OfficialPhaseRecorder(model.wrapper)
+
+        def generate_custom_voice() -> Sample:
+            wavs, sample_rate = model.generate_custom_voice(
+                text,
+                language=language,
+                speaker=speaker,
+                max_new_tokens=max_new_tokens,
+            )
+            return Sample(_to_numpy(wavs[0]), sample_rate, {})
+
+        return generate_custom_voice, device, load_seconds, recorder
+
     dtype = RUNTIME.resolved_dtype(device)
     start = time.perf_counter()
-    model = Qwen3TTS.from_checkpoint(checkpoint, device, dtype)
+    if checkpoint is None and not RUNTIME.checkpoint.exists():
+        # Source checkouts do not necessarily include the generated fixture.
+        model = Qwen3TTS.tiny(RUNTIME.seed).to(device=device, dtype=dtype).eval()
+    else:
+        config_path = path / "config.json"
+        weights_path = path / "model.pt"
+        if not config_path.is_file() or not weights_path.is_file():
+            raise click.ClickException(
+                f"{path} is not a Nero checkpoint; expected config.json and model.pt"
+            )
+        model = Qwen3TTS.from_checkpoint(path, device, dtype)
     load_seconds = time.perf_counter() - start
     frames = min(
         RUNTIME.max_frames,
@@ -220,13 +292,18 @@ def _benchmark(
     for index in range(iterations):
         if recorder is not None:
             recorder.reset()
+        if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
         sample = generate()
         _synchronize(device)
         wall = time.perf_counter() - start
         audio_seconds = sample.audio.size / sample.sample_rate
-        phases = recorder.summary() if recorder is not None else sample.phases
+        phases = (
+            _official_modular_phases(recorder.summary(), wall)
+            if recorder is not None
+            else sample.phases
+        )
         peak = (
             torch.cuda.max_memory_allocated() / 1024**2
             if device.type == "cuda"
@@ -299,7 +376,7 @@ def main(
     """Profiles TEXT synthesis without including optional trace overhead."""
     torch.manual_seed(RUNTIME.seed)
     if backend == "nero":
-        loaded = _load_nero(pl.Path(model) if model else RUNTIME.checkpoint, text)
+        loaded = _load_nero(model, text, lang, speaker, max_new_tokens)
     else:
         loaded = _load_official(
             model or DEFAULT_MODEL,
@@ -319,6 +396,19 @@ def main(
     mean_wall = statistics.mean(row.wall_seconds for row in rows)
     mean_rtf = statistics.mean(row.rtf for row in rows)
     print(f"summary: mean wall {mean_wall:.3f}s; mean rtf {mean_rtf:.3f}")
+    phase_names = sorted({name for row in rows for name in row.phases})
+    mean_phases = {
+        name: statistics.mean(row.phases.get(name, 0.0) for row in rows)
+        for name in phase_names
+    }
+    if mean_phases:
+        print(
+            "mean phases: "
+            + ", ".join(
+                f"{name}={value * 1000:.2f}ms"
+                for name, value in mean_phases.items()
+            )
+        )
 
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -332,6 +422,8 @@ def main(
             "iterations": [asdict(row) for row in rows],
             "mean_wall_seconds": mean_wall,
             "mean_rtf": mean_rtf,
+            "phase_semantics": "non_overlapping",
+            "mean_phases": mean_phases,
         }
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
