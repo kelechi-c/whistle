@@ -18,10 +18,10 @@ This baseline uses the official `qwen-tts` runtime and
 ### Method
 
 Every run uses the complete contents of [alicia.txt](alicia.txt). The profiler
-forces `min_new_tokens == max_new_tokens == 512`, preventing EOS from making
-one implementation finish early. The official generator produces 511 complete
-codec frames from those 512 selected talker tokens, or 40.880 seconds of
-24 kHz audio.
+forces `min_new_tokens == max_new_tokens == 1280`, preventing EOS from making
+one implementation finish early. The official generator produces 1,279
+complete codec frames from those 1,280 selected talker tokens, or 102.320
+seconds of 24 kHz audio.
 
 One warmup is excluded. The reported p50 values are the medians of three
 measured runs.
@@ -33,7 +33,7 @@ uv run --no-sync python profile_tts.py \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
   --lang English \
-  --max-new-tokens 512 \
+  --max-new-tokens 1280 \
   --fixed-tokens \
   --warmup 1 \
   --iterations 3 \
@@ -44,20 +44,20 @@ uv run --no-sync python profile_tts.py \
 
 | Run | Generation latency | Audio | RTF | Throughput |
 |---:|---:|---:|---:|---:|
-| 1 | 35.267 s | 40.880 s | 0.863 | 1.159× |
-| 2 | 35.098 s | 40.880 s | 0.859 | 1.165× |
-| 3 | 35.111 s | 40.880 s | 0.859 | 1.164× |
-| **p50** | **35.111 s** | **40.880 s** | **0.859** | **1.164×** |
+| 1 | 91.722 s | 102.320 s | 0.896 | 1.116× |
+| 2 | 91.837 s | 102.320 s | 0.898 | 1.114× |
+| 3 | 91.631 s | 102.320 s | 0.896 | 1.117× |
+| **p50** | **91.722 s** | **102.320 s** | **0.896** | **1.116×** |
 
 ### Aggregate results
 
 | Metric | Result |
 |---|---:|
-| Cached model load | 8.487 s |
-| Mean generation latency | 35.159 s |
-| Generation latency range | 35.098–35.267 s |
-| Mean RTF | 0.860 |
-| Peak allocated GPU memory | 2,772.7 MiB |
+| Cached model load | 12.418 s |
+| Mean generation latency | 91.730 s |
+| Generation latency range | 91.631–91.837 s |
+| Mean RTF | 0.896 |
+| Peak allocated GPU memory | 2,836.4 MiB |
 
 ### Phase breakdown
 
@@ -66,10 +66,10 @@ the inclusive talker measurement.
 
 | Generation phase | Mean latency | Share of wall time |
 |---|---:|---:|
-| Code predictor | 25.199 s | 71.67% |
-| Talker excluding code predictor | 9.189 s | 26.14% |
-| Speech codec | 749.68 ms | 2.13% |
-| Wrapper overhead | 21.35 ms | 0.06% |
+| Code predictor | 65.791 s | 71.72% |
+| Talker excluding code predictor | 24.054 s | 26.22% |
+| Speech codec | 1.838 s | 2.00% |
+| Wrapper overhead | 46.65 ms | 0.05% |
 
 The complete machine-readable report is
 [`benchmarks/official_tts_0.6b_alicia.json`](benchmarks/official_tts_0.6b_alicia.json).
@@ -83,14 +83,11 @@ decode loop in `faster_decode.py`.
 ### Method
 
 The environment and Alicia input are the same as the official baseline. The
-split path forces `min_new_tokens == max_new_tokens == 512`, producing 512
-codec frames and 40.960 seconds of audio. One warmup is excluded, followed by
-three measured runs.
-
-The official path's 512-token budget emits 511 complete frames, while the
-explicit loop's public limit counts completed frames directly. The 80 ms
-output-duration difference is recorded here rather than silently treating the
-two output shapes as identical.
+shared budget is 1,280 selected talker tokens. Because the explicit loop's
+internal limit counts completed frames, its profiler adapter requests 1,279
+frames to match the official generator's token-to-frame convention exactly.
+Both paths therefore produce 1,279 frames and 102.320 seconds of audio. One
+warmup is excluded, followed by three measured runs.
 
 ```bash
 uv run --no-sync python profile_tts.py \
@@ -99,7 +96,7 @@ uv run --no-sync python profile_tts.py \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
   --lang English \
-  --max-new-tokens 512 \
+  --max-new-tokens 1280 \
   --fixed-tokens \
   --warmup 1 \
   --iterations 3 \
@@ -110,46 +107,46 @@ uv run --no-sync python profile_tts.py \
 
 | Run | Generation latency | Audio | RTF | Throughput |
 |---:|---:|---:|---:|---:|
-| 1 | 27.902 s | 40.960 s | 0.681 | 1.468× |
-| 2 | 27.857 s | 40.960 s | 0.680 | 1.470× |
-| 3 | 28.057 s | 40.960 s | 0.685 | 1.460× |
-| **p50** | **27.902 s** | **40.960 s** | **0.681** | **1.468×** |
+| 1 | 71.382 s | 102.320 s | 0.698 | 1.433× |
+| 2 | 71.210 s | 102.320 s | 0.696 | 1.437× |
+| 3 | 71.423 s | 102.320 s | 0.698 | 1.433× |
+| **p50** | **71.382 s** | **102.320 s** | **0.698** | **1.433×** |
 
 ### Aggregate results
 
 | Metric | Result |
 |---|---:|
-| Cached model load | 15.914 s |
-| Mean generation latency | 27.939 s |
-| Generation latency range | 27.857–28.057 s |
-| Mean RTF | 0.682 |
-| Peak allocated GPU memory | 2,869.2 MiB |
+| Cached model load | 14.395 s |
+| Mean generation latency | 71.339 s |
+| Generation latency range | 71.210–71.423 s |
+| Mean RTF | 0.697 |
+| Peak allocated GPU memory | 3,013.2 MiB |
 
 ### Phase breakdown
 
 | Generation phase | Mean latency | Share of wall time |
 |---|---:|---:|
-| Decode | 27.138 s | 97.13% |
-| Codec | 747.64 ms | 2.68% |
-| Prefill | 50.21 ms | 0.18% |
-| Preparation | 1.98 ms | 0.01% |
+| Decode | 69.450 s | 97.35% |
+| Codec | 1.835 s | 2.57% |
+| Prefill | 50.16 ms | 0.07% |
+| Preparation | 1.96 ms | <0.01% |
 
 ### Decode breakdown
 
 This diagnostic run adds asynchronous CUDA events around the three repeated
 decode stages. It does not synchronize between forwards. The uninstrumented
-27.902-second p50 above remains the headline latency; the instrumented run's
-p50 was 28.292 seconds.
+71.382-second p50 above remains the headline latency; the separate instrumented
+run's p50 was 71.266 seconds.
 
 | Decode stage | Calls | p50 latency | Share of decode | Average |
 |---|---:|---:|---:|---:|
-| Predictor seed stage | 512 | 1.445 s | 5.26% | 2.823 ms/frame |
-| Predictor residual stage | 512 × 14 | 18.482 s | 67.23% | 36.098 ms/frame |
-| Talker step | 511 | 7.540 s | 27.43% | 14.756 ms/step |
-| Other and host overhead | — | 22.97 ms | 0.08% | — |
-| **Total decode** | — | **27.491 s** | **100%** | — |
+| Predictor seed stage | 1,279 | 3.627 s | 5.23% | 2.836 ms/frame |
+| Predictor residual stage | 1,279 × 14 | 45.777 s | 66.00% | 35.792 ms/frame |
+| Talker step | 1,278 | 19.901 s | 28.69% | 15.572 ms/step |
+| Other and host overhead | — | 58.02 ms | 0.08% | — |
+| **Total decode** | — | **69.363 s** | **100%** | — |
 
-The two predictor stages total 19.928 seconds, or 72.49% of decode and 38.921
+The two predictor stages total 49.404 seconds, or 71.23% of decode and 38.627
 ms per generated frame. The residual stage includes its embedding, forward,
 argmax, and cache-update sequence for all 14 residual codebooks. The talker
 stage includes frame-embedding assembly, mask and position preparation, the
