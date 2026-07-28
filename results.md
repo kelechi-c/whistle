@@ -332,6 +332,18 @@ only the talker cache implementation.
 | Talker step | 26.106 s | 18.685 s | −28.43% |
 | Combined predictor | 29.413 s | 29.430 s | +0.06% |
 
+The recommended dynamic-talker-cache configuration has this p50 decode
+composition:
+
+| Decode module | Calls | p50 latency | Share of decode | Average |
+|---|---:|---:|---:|---:|
+| Predictor seed | 1,279 | 2.019 s | 4.19% | 1.578 ms/frame |
+| Predictor residuals | 1,279 × 14 | 27.411 s | 56.95% | 1.531 ms/pass |
+| **Combined predictor** | — | **29.430 s** | **61.15%** | **23.010 ms/frame** |
+| Talker step | 1,278 | 18.685 s | 38.82% | 14.620 ms/step |
+| Other decode overhead | — | 11.53 ms | 0.02% | — |
+| **Total decode** | — | **48.127 s** | **100%** | — |
+
 The predictor's 0.06% difference is measurement noise, confirming that the
 talker cache alone causes the regression. In the installed Transformers cache
 and masking implementation, `StaticCache` returns its full maximum-length KV
