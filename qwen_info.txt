@@ -1,0 +1,6 @@
+Qwen3-TTS leverages the Qwen3 LM family to achieve high concurrency and low-latency inference. Text
+is processed using the standard Qwen tokenizer, while speech is encoded using the Qwen-TTS-Tokenizer.
+To maintain precise identity control, we jointly train a learnable speaker encoder with the backbone.
+For real-time synthesis, Qwen3-TTS employs a dual-track representation by concatenating textual and
+acoustic tokens along the channel axis. Upon receiving a textual token, the model immediately predicts
+the corresponding acoustic tokens, which are then converted into waveforms by the Code2Wav module.
