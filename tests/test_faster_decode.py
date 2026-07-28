@@ -2,7 +2,6 @@
 
 import unittest
 
-import numpy as np
 from qwen_tts import Qwen3TTSModel
 from qwen_tts.core.models import (
     Qwen3TTSConfig,
@@ -26,13 +25,24 @@ class TinyProcessor:
 
 
 class TinyCodec:
-    """Avoids running a vocoder while preserving the official decode boundary."""
+    """Provides the direct tensor codec surface used by optimized inference."""
 
-    def decode(
-        self, items: list[dict[str, torch.Tensor]]
-    ) -> tuple[list[np.ndarray], int]:
-        frames = items[0]["audio_codes"].shape[0]
-        return [np.zeros(frames * 16, dtype=np.float32)], 24_000
+    total_upsample = 16
+
+    def __init__(self) -> None:
+        self.model = self
+        self.decoder = self
+
+    def __call__(self, codes: torch.Tensor) -> torch.Tensor:
+        samples = codes.shape[-1] * self.total_upsample
+        return torch.zeros(
+            (codes.shape[0], 1, samples),
+            device=codes.device,
+            dtype=torch.float32,
+        )
+
+    def get_output_sample_rate(self) -> int:
+        return 24_000
 
 
 class FasterDecodeTest(unittest.TestCase):
@@ -92,15 +102,15 @@ class FasterDecodeTest(unittest.TestCase):
         model.load_speech_tokenizer(TinyCodec())
         tts = Qwen3TTSModel(model.eval(), TinyProcessor())
 
-        wavs, sample_rate, timings = tts_infer(
+        waveform, sample_rate, timings = tts_infer(
             tts,
             "hi",
             speaker="ryan",
             max_new_tokens=2,
-            min_new_tokens=2,
         )
 
-        self.assertEqual(wavs[0].shape, (32,))
+        self.assertEqual(waveform.shape, (1, 32))
+        self.assertEqual(waveform.device.type, "cpu")
         self.assertEqual(sample_rate, 24_000)
         self.assertEqual(timings["frames"], 2.0)
         self.assertGreaterEqual(timings["prefill"], 0.0)

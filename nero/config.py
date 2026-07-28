@@ -19,7 +19,7 @@ class RuntimeConfig:
     device: DeviceChoice = "auto"
     dtype: DTypeChoice = "float32"
     seed: int = 0
-    max_frames: int = 24
+    max_frames: int = 1_280
     frames_per_character: float = 0.25
 
     def resolved_device(self) -> torch.device:
