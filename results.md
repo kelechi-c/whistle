@@ -358,3 +358,80 @@ or captured to exploit its fixed addresses and shapes. The immediate
 recommendation is to retain the compiled static-cache predictor but use a
 dynamic talker cache. The A/B report is
 [`benchmarks/v3_dynamic_talker_cache_ab.json`](benchmarks/v3_dynamic_talker_cache_ab.json).
+
+## `faster_decode` v4 — predictor and talker CUDA graphs
+
+V4 captures the complete 15-token predictor loop as one CUDA graph and the
+one-token talker pass as a second graph. Both use persistent fixed buffers,
+precomputed masks, and static caches. Graph construction and eager capture
+warmups occur in the excluded first inference.
+
+The code moved under `src/whistle`, so the current uninstalled source tree
+requires `PYTHONPATH=src` with `uv run --no-sync`.
+
+```bash
+PYTHONPATH=src uv run --no-sync python profile_tts.py \
+  --text-file alicia.txt \
+  --backend split \
+  --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --speaker Ryan \
+  --lang English \
+  --max-new-tokens 1279 \
+  --warmup 1 \
+  --iterations 3 \
+  --json-out benchmarks/v4_faster_decode_0.6b_alicia.json
+```
+
+### Per-run results
+
+| Run | Generation latency | Audio | RTF | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 64.432 s | 102.320 s | 0.630 | 1.588× |
+| 2 | 64.431 s | 102.320 s | 0.630 | 1.588× |
+| 3 | 64.430 s | 102.320 s | 0.630 | 1.588× |
+| **p50** | **64.431 s** | **102.320 s** | **0.630** | **1.588×** |
+
+### Aggregate results
+
+| Metric | Result |
+|---|---:|
+| Cached model load | 16.422 s |
+| Mean generation latency | 64.431 s |
+| Generation latency range | 64.430–64.432 s |
+| Mean RTF | 0.630 |
+| Peak allocated GPU memory | 3,158.6 MiB |
+
+V4 remains 29.75% lower latency than official, but regresses 12.10% from v3
+and 28.83% from the mixed-cache A/B candidate.
+
+### Modular breakdown
+
+Asynchronous CUDA events wrap the two graph replay boundaries. They do not
+modify or synchronize inside the captured graphs.
+
+```bash
+PYTHONPATH=src uv run --no-sync python profile_tts_modular.py \
+  --warmup 1 \
+  --iterations 3 \
+  --json-out benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json
+```
+
+| Decode module | Calls | p50 latency | Share of decode | Average |
+|---|---:|---:|---:|---:|
+| Predictor-loop graph | 1,279 | 36.240 s | 57.95% | 28.334 ms/frame |
+| Talker graph | 1,278 | 26.180 s | 41.87% | 20.485 ms/step |
+| Other decode overhead | — | 113.49 ms | 0.18% | 0.089 ms/frame |
+| **Total decode** | — | **62.533 s** | **100%** | — |
+
+The predictor graph is 23.21% slower than v3's 29.413-second compiled
+predictor. V4 captures and replays the eager predictor kernels, so it removes
+CPU launch overhead but loses the fusion and kernel improvements supplied by
+`torch.compile`. Capturing a compiled full-frame predictor is the required A/B.
+
+The talker graph is effectively unchanged from v3 static-cache talker
+latency—26.180 versus 26.106 seconds—and remains 40.11% slower than the dynamic
+talker-cache control. Graph replay does not offset full-capacity static-cache
+SDPA work. The headline and modular reports are
+[`benchmarks/v4_faster_decode_0.6b_alicia.json`](benchmarks/v4_faster_decode_0.6b_alicia.json)
+and
+[`benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json).

@@ -1,0 +1,42 @@
+{
+  "backend": "official",
+  "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "text_file": "alicia.txt",
+  "text_characters": 1264,
+  "token_count": 1280,
+  "expected_codec_frames": 1279,
+  "load_seconds": 14.563588097007596,
+  "iterations": [
+    {
+      "wall_seconds": 90.85633431500173,
+      "audio_seconds": 102.32,
+      "rtf": 0.8879626105844579,
+      "xrt": 1.1261735438858163,
+      "peak_memory_mb": 2836.44921875,
+      "phases": {}
+    },
+    {
+      "wall_seconds": 90.68587067299813,
+      "audio_seconds": 102.32,
+      "rtf": 0.8862966250293016,
+      "xrt": 1.1282904298173755,
+      "peak_memory_mb": 2836.44921875,
+      "phases": {}
+    },
+    {
+      "wall_seconds": 91.34089920599945,
+      "audio_seconds": 102.32,
+      "rtf": 0.892698389425327,
+      "xrt": 1.1201991757190783,
+      "peak_memory_mb": 2836.44921875,
+      "phases": {}
+    }
+  ],
+  "mean_wall_seconds": 90.9610347313331,
+  "mean_rtf": 0.8889858750130288,
+  "p50_wall_seconds": 90.85633431500173,
+  "p50_rtf": 0.8879626105844579,
+  "phase_semantics": "non_overlapping",
+  "mean_phases": {},
+  "p50_phases": {}
+}

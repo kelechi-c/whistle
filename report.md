@@ -17,12 +17,17 @@ RTX 3050 6 GB Laptop GPU.
 | V2 | Reduced Python and CPU synchronization overhead | 67.974 s | 0.664 | 4.78% |
 | V3 | Static caches and torch-compiled predictor | 57.477 s | 0.562 | 15.44% |
 | A/B candidate | V3 with dynamic talker cache | 50.011 s | 0.489 | 12.91% |
+| V4 | CUDA graphs for predictor loop and talker pass | 64.431 s | 0.630 | −28.83% vs candidate |
 
 V1 exposed the predictor and talker forwards instead of relying on nested
 Hugging Face generation. V2 kept buffers, cache positions, codec IDs, and
 waveform assembly on-device and removed repeated Python/CPU synchronization.
 V3 compiled the predictor transformer in reduce-overhead mode and gave it a
 fixed static KV cache.
+
+V4 captured the complete eager predictor loop and one talker token as separate
+CUDA graphs. Its extremely stable 64.431-second result shows deterministic
+replay, but latency regressed.
 
 ## Findings
 
@@ -42,6 +47,13 @@ Each one-token eager talker pass therefore materializes a causal mask and
 attends across the full allocation. Dynamic cache exposes only populated KV
 entries and uses the cheaper mask-free single-token path.
 
+V4's modular profile explains its regression. The captured predictor loop
+takes 36.240 seconds, 23.21% slower than the torch-compiled V3 predictor,
+because graph capture replays the unfused eager kernels instead of retaining
+the compiled predictor kernels. The captured talker remains at 26.180 seconds:
+graph replay reduces launch overhead but does not reduce full-capacity static
+attention work.
+
 ## Conclusion
 
 Static cache is beneficial for the compiled predictor but currently harmful
@@ -49,4 +61,6 @@ for the eager talker. The best measured configuration is a compiled
 static-cache predictor with a dynamic talker cache: 50.011 seconds p50,
 1.834× faster than the official baseline. Static talker cache should return
 only when the talker forward is compiled or CUDA-graph captured so fixed
-addresses and shapes can offset its larger attention extent.
+addresses and shapes can offset its larger attention extent. V4 shows that
+capture alone is insufficient: the next experiment should capture a compiled
+full-frame predictor and avoid full-capacity talker attention.

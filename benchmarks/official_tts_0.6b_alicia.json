@@ -1,0 +1,69 @@
+{
+  "backend": "official",
+  "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "text_file": "alicia.txt",
+  "text_characters": 1264,
+  "fixed_tokens": true,
+  "token_count": 1280,
+  "expected_codec_frames": 1279,
+  "decode_breakdown": false,
+  "load_seconds": 12.41822401600075,
+  "iterations": [
+    {
+      "wall_seconds": 91.72153221699409,
+      "audio_seconds": 102.32,
+      "rtf": 0.8964184149432574,
+      "xrt": 1.1155504877298836,
+      "peak_memory_mb": 2836.44921875,
+      "phases": {
+        "talker_excluding_code_predictor": 24.097548694610595,
+        "code_predictor": 65.73743568038941,
+        "codec": 1.839258544921875,
+        "wrapper_overhead": 0.04728929707221208
+      }
+    },
+    {
+      "wall_seconds": 91.83659447000537,
+      "audio_seconds": 102.32,
+      "rtf": 0.8975429482995052,
+      "xrt": 1.114152812291168,
+      "peak_memory_mb": 2836.44921875,
+      "phases": {
+        "talker_excluding_code_predictor": 24.065387451171887,
+        "code_predictor": 65.88616723632812,
+        "codec": 1.8388665771484376,
+        "wrapper_overhead": 0.04617320535692149
+      }
+    },
+    {
+      "wall_seconds": 91.63096103801217,
+      "audio_seconds": 102.32,
+      "rtf": 0.8955332392299862,
+      "xrt": 1.1166531360241172,
+      "peak_memory_mb": 2836.44921875,
+      "phases": {
+        "talker_excluding_code_predictor": 23.999218563079836,
+        "code_predictor": 65.75010174942017,
+        "codec": 1.8351416015625,
+        "wrapper_overhead": 0.04649912394967037
+      }
+    }
+  ],
+  "mean_wall_seconds": 91.7296959083372,
+  "mean_rtf": 0.8964982008242496,
+  "p50_wall_seconds": 91.72153221699409,
+  "p50_rtf": 0.8964184149432574,
+  "phase_semantics": "non_overlapping",
+  "mean_phases": {
+    "code_predictor": 65.79123488871257,
+    "codec": 1.8377555745442709,
+    "talker_excluding_code_predictor": 24.05405156962077,
+    "wrapper_overhead": 0.04665387545960131
+  },
+  "p50_phases": {
+    "code_predictor": 65.75010174942017,
+    "codec": 1.8388665771484376,
+    "talker_excluding_code_predictor": 24.065387451171887,
+    "wrapper_overhead": 0.04649912394967037
+  }
+}
