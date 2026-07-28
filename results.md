@@ -10,7 +10,8 @@ codec frames (102.320 seconds of audio).
 |---|---|---:|---:|---:|---:|
 | Official baseline | Official `qwen-tts` | 91.722 s | 0.896 | 1.116× | — |
 | `faster_decode` v1 | Explicit decode scheduler | 71.382 s | 0.698 | 1.433× | −22.18% vs official |
-| **`faster_decode` v2** | **Reduced Python/CPU sync overhead** | **67.974 s** | **0.664** | **1.505×** | **−4.78% vs v1** |
+| `faster_decode` v2 | Reduced Python/CPU sync overhead | 67.974 s | 0.664 | 1.505× | −4.78% vs v1 |
+| **`faster_decode` v3** | **Static cache + torch-compiled predictor pass** | **57.477 s** | **0.562** | **1.780×** | **−15.44% vs v2** |
 
 The official baseline is retained for future version comparisons rather than
 rerun after every fast-path change.
@@ -230,3 +231,118 @@ reintroducing fine-grained synchronization into the optimized loop.
 
 The complete v2 report is
 [`benchmarks/v2_faster_decode_0.6b_alicia.json`](benchmarks/v2_faster_decode_0.6b_alicia.json).
+
+## `faster_decode` v3 — static cache + torch-compiled predictor pass
+
+V3 replaces the growing talker and per-frame predictor caches with
+preallocated `StaticCache` instances. The predictor transformer is compiled
+once with `torch.compile(mode="reduce-overhead")` and reused across frames.
+The excluded warmup absorbs predictor compilation before measurements begin.
+
+```bash
+uv run --no-sync python profile_tts.py \
+  --text-file alicia.txt \
+  --backend split \
+  --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --speaker Ryan \
+  --lang English \
+  --max-new-tokens 1279 \
+  --warmup 1 \
+  --iterations 3 \
+  --json-out benchmarks/v3_faster_decode_0.6b_alicia.json
+```
+
+### Per-run results
+
+| Run | Generation latency | Audio | RTF | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 57.554 s | 102.320 s | 0.562 | 1.778× |
+| 2 | 57.455 s | 102.320 s | 0.562 | 1.781× |
+| 3 | 57.477 s | 102.320 s | 0.562 | 1.780× |
+| **p50** | **57.477 s** | **102.320 s** | **0.562** | **1.780×** |
+
+### Aggregate results
+
+| Metric | Result |
+|---|---:|
+| Cached model load | 20.211 s |
+| Mean generation latency | 57.495 s |
+| Generation latency range | 57.455–57.554 s |
+| Mean RTF | 0.562 |
+| Peak allocated GPU memory | 3,080.6 MiB |
+
+### Phase breakdown
+
+| Generation phase | Mean latency | Share of wall time |
+|---|---:|---:|
+| Decode | 55.548 s | 96.61% |
+| Codec | 1.843 s | 3.20% |
+| Prefill | 79.69 ms | 0.14% |
+| Preparation | 21.82 ms | 0.04% |
+
+V3 is 15.44% lower latency than v2 and 37.33% lower than the retained official
+baseline, equivalent to a 1.596× speedup over official inference.
+
+The complete v3 report is
+[`benchmarks/v3_faster_decode_0.6b_alicia.json`](benchmarks/v3_faster_decode_0.6b_alicia.json).
+
+### Modular decode comparison
+
+The separate `profile_tts_modular.py` harness applies checked CUDA-event
+instrumentation to an in-memory copy of the current hot path. It does not edit
+`faster_decode.py`, synchronize between forwards, or include compilation in
+the measured runs.
+
+```bash
+uv run --no-sync python profile_tts_modular.py \
+  --warmup 1 \
+  --iterations 3 \
+  --json-out benchmarks/v3_faster_decode_0.6b_alicia_breakdown.json
+```
+
+| Decode stage | Calls | v1 p50 | v3 p50 | Change | V3 average |
+|---|---:|---:|---:|---:|---:|
+| Predictor seed | 1,279 | 3.627 s | 2.004 s | −44.74% | 1.567 ms/frame |
+| Predictor residuals | 1,279 × 14 | 45.777 s | 27.409 s | −40.12% | 1.531 ms/pass |
+| **Combined predictor** | — | **49.404 s** | **29.413 s** | **−40.46%** | **22.997 ms/frame** |
+| Talker step | 1,278 | 19.901 s | 26.106 s | +31.18% | 20.427 ms/step |
+| Other decode overhead | — | 58.02 ms | 11.52 ms | −80.14% | — |
+| **Total decode** | — | **69.363 s** | **55.518 s** | **−19.96%** | — |
+
+The compiled static-cache predictor is improving: its combined p50 cost falls
+by 19.991 seconds. The talker path regresses by 6.205 seconds and now consumes
+47.02% of decode, versus 28.69% in v1. This comparison cannot independently
+attribute the regression to static cache or another intervening talker change;
+an A/B run with only the talker cache type changed is required for that.
+
+The instrumented v3 run measured 57.426 seconds p50 wall latency, close to the
+57.477-second uninstrumented headline. The machine-readable breakdown is
+[`benchmarks/v3_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v3_faster_decode_0.6b_alicia_breakdown.json).
+
+### Talker cache A/B
+
+This experiment retains the compiled predictor and its static cache and changes
+only the talker cache implementation.
+
+| Metric | Static talker cache | Dynamic talker cache | Change |
+|---|---:|---:|---:|
+| p50 wall latency | 57.426 s | 50.011 s | −12.91% |
+| p50 RTF | 0.561 | 0.489 | −12.91% |
+| Total decode | 55.518 s | 48.127 s | −13.31% |
+| Talker step | 26.106 s | 18.685 s | −28.43% |
+| Combined predictor | 29.413 s | 29.430 s | +0.06% |
+
+The predictor's 0.06% difference is measurement noise, confirming that the
+talker cache alone causes the regression. In the installed Transformers cache
+and masking implementation, `StaticCache` returns its full maximum-length KV
+buffers and reports that maximum as the mask length. Its compileable flag also
+disables SDPA's causal-mask skip. Every eager one-token talker forward
+therefore materializes a mask and attends over the full 1,432-slot allocation.
+`DynamicCache` returns only populated KV entries and permits the mask-free SDPA
+single-token path.
+
+Static talker cache is counterproductive until the talker forward is compiled
+or captured to exploit its fixed addresses and shapes. The immediate
+recommendation is to retain the compiled static-cache predictor but use a
+dynamic talker cache. The A/B report is
+[`benchmarks/v3_dynamic_talker_cache_ab.json`](benchmarks/v3_dynamic_talker_cache_ab.json).

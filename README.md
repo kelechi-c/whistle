@@ -11,13 +11,17 @@ canonical [Alicia input](alicia.txt):
 | Version | Tag | p50 latency | p50 RTF | Throughput |
 |---|---|---:|---:|---:|
 | Official baseline | Official `qwen-tts` | 91.722 s | 0.896 | 1.116× |
-| `faster_decode` v1 | Explicit decode scheduler | 71.382 s | 0.698 | 1.433× |
-| **`faster_decode` v2** | **Reduced Python/CPU sync overhead** | **67.974 s** | **0.664** | **1.505×** |
+| v1 | Explicit prefill/decode | 71.382 s | 0.698 | 1.433× |
+| v2 | Reduced Python/CPU sync overhead | 67.974 s | 0.664 | 1.505× |
+| **v3** | **Static cache + torch-compiled predictor pass** | **57.477 s** | **0.562** | **1.780×** |
 
 Every version emits 1,279 complete codec frames, or 102.320 seconds of audio.
 Lower latency and RTF are better. Measurements use an RTX 3050 6 GB Laptop GPU
 with PyTorch 2.13.0, CUDA 13.0, bfloat16, and SDPA. V2 reduces latency by 4.78%
-from v1 and by 25.89% from the retained official baseline.
+from v1. V3 reduces latency by another 15.44%, or 37.33% from the retained
+official baseline. V3's modular profile shows 40.46% lower predictor latency
+than v1, partly offset by 31.18% higher talker-step latency.
 
 See [results.md](results.md) for the benchmark method, command, individual
-runs, and phase breakdown.
+runs, and phase breakdown. See [report.md](report.md) for a concise optimization
+history and the talker-cache A/B findings.
