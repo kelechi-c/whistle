@@ -1,5 +1,20 @@
 # Benchmark results
 
+## Version summary
+
+All versions use the complete [Alicia input](alicia.txt), Ryan, English,
+bfloat16, SDPA, one excluded warmup, three measured runs, and 1,279 complete
+codec frames (102.320 seconds of audio).
+
+| Version | Tag | p50 latency | p50 RTF | Throughput | Change from prior |
+|---|---|---:|---:|---:|---:|
+| Official baseline | Official `qwen-tts` | 91.722 s | 0.896 | 1.116× | — |
+| `faster_decode` v1 | Explicit decode scheduler | 71.382 s | 0.698 | 1.433× | −22.18% vs official |
+| **`faster_decode` v2** | **Reduced Python/CPU sync overhead** | **67.974 s** | **0.664** | **1.505×** | **−4.78% vs v1** |
+
+The official baseline is retained for future version comparisons rather than
+rerun after every fast-path change.
+
 ## Official Qwen3-TTS 0.6B baseline
 
 This baseline uses the official `qwen-tts` runtime and
@@ -158,3 +173,60 @@ The machine-readable diagnostic report is
 
 The complete machine-readable report is
 [`benchmarks/faster_decode_0.6b_alicia.json`](benchmarks/faster_decode_0.6b_alicia.json).
+
+## `faster_decode` v2 — reduced Python/CPU sync overhead
+
+V2 shrinks the hot path and removes Python/CPU synchronization and bookkeeping
+from repeated decode work. Fixed codec buffers, cache positions, position IDs,
+and predictor embedding weights are prepared once and remain on-device. The
+codec writes chunk outputs directly into its final GPU waveform buffer.
+
+The split API now counts completed codec frames directly, so this command uses
+1,279 frames to match the retained official baseline's 1,280-token output.
+
+```bash
+uv run --no-sync python profile_tts.py \
+  --text-file alicia.txt \
+  --backend split \
+  --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --speaker Ryan \
+  --lang English \
+  --max-new-tokens 1279 \
+  --warmup 1 \
+  --iterations 3 \
+  --json-out benchmarks/v2_faster_decode_0.6b_alicia.json
+```
+
+### Per-run results
+
+| Run | Generation latency | Audio | RTF | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 67.606 s | 102.320 s | 0.661 | 1.513× |
+| 2 | 67.974 s | 102.320 s | 0.664 | 1.505× |
+| 3 | 68.229 s | 102.320 s | 0.667 | 1.500× |
+| **p50** | **67.974 s** | **102.320 s** | **0.664** | **1.505×** |
+
+### Aggregate results
+
+| Metric | Result |
+|---|---:|
+| Cached model load | 19.631 s |
+| Mean generation latency | 67.937 s |
+| Generation latency range | 67.606–68.229 s |
+| Mean RTF | 0.664 |
+| Peak allocated GPU memory | 3,079.4 MiB |
+
+### Phase breakdown
+
+The current implementation records only broad CUDA-event boundaries to avoid
+reintroducing fine-grained synchronization into the optimized loop.
+
+| Generation phase | Mean latency | Share of wall time |
+|---|---:|---:|
+| Decode | 66.052 s | 97.23% |
+| Codec | 1.831 s | 2.70% |
+| Prefill | 50.07 ms | 0.07% |
+| Preparation | 1.99 ms | <0.01% |
+
+The complete v2 report is
+[`benchmarks/v2_faster_decode_0.6b_alicia.json`](benchmarks/v2_faster_decode_0.6b_alicia.json).
