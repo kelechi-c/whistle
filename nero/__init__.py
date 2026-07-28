@@ -1,6 +1,5 @@
-"""Minimal Qwen3-TTS inference package."""
+"""Runtime configuration for the official Qwen3-TTS inference path."""
 
 from nero.config import RUNTIME, RuntimeConfig
-from nero.model.tts import GenerationResult, Qwen3TTS
 
-__all__ = ["GenerationResult", "Qwen3TTS", "RUNTIME", "RuntimeConfig"]
+__all__ = ["RUNTIME", "RuntimeConfig"]

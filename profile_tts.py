@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Low-overhead TTS benchmark for Nero fixtures and official Qwen3-TTS models."""
+"""Compares explicit split inference with the official Qwen generation path."""
 
-import json
-import time
-import click
-import torch
-import statistics
-import numpy as np
-import pathlib as pl
-import soundfile as sf
-from nero.config import RUNTIME
-from nero.model.tts import Qwen3TTS
 from collections import defaultdict
-from typing import Any, Callable, Literal
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass, field
+import json
+import pathlib as pl
+import statistics
+import time
+from typing import Any, Callable, Literal
 
+import click
+import numpy as np
+import soundfile as sf
+import torch
 
-Backend = Literal["nero", "official"]
+from faster_decode import tts_infer
+from nero.config import RUNTIME
+
+Backend = Literal["split", "official"]
 Generate = Callable[[], "Sample"]
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 DEFAULT_TEXT = "Autoregressive decoding generates one dependent audio frame at a time."
@@ -121,80 +122,38 @@ def _official_modular_phases(
     }
 
 
-def _load_nero(
+def _load_split(
     checkpoint: str | None,
     text: str,
     language: str,
     speaker: str,
     max_new_tokens: int,
 ) -> tuple[Generate, torch.device, float, AbstractContextManager[Any]]:
-    """Loads a Nero fixture or weight-compatible CustomVoice checkpoint."""
-    device = RUNTIME.resolved_device()
-    path = pl.Path(checkpoint) if checkpoint is not None else RUNTIME.checkpoint
-    nero_weights = path / "model.pt"
-    is_fixture = nero_weights.is_file() or (
-        checkpoint is None and not RUNTIME.checkpoint.exists()
-    )
+    """Loads the official model for the explicit greedy prefill/decode path."""
+    if not torch.cuda.is_available():
+        raise click.ClickException("the split backend requires cuda")
+    from qwen_tts import Qwen3TTSModel
 
-    if not is_fixture:
-        is_hugging_face_id = checkpoint is not None and "/" in checkpoint
-        is_hugging_face_dir = (
-            path.is_dir()
-            and (path / "config.json").is_file()
-            and (path / "model.safetensors").is_file()
-        )
-        if not is_hugging_face_id and not is_hugging_face_dir:
-            raise click.ClickException(
-                f"{path} is neither a Nero checkpoint nor a Hugging Face "
-                "CustomVoice checkpoint"
-            )
-        from nero.model.custom_voice import Qwen3CustomVoice
-
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-        start = time.perf_counter()
-        model = Qwen3CustomVoice.from_pretrained(
-            checkpoint or path,
-            device=device,
-            dtype=dtype,
-            attn_implementation="sdpa",
-        )
-        _synchronize(device)
-        load_seconds = time.perf_counter() - start
-        recorder = OfficialPhaseRecorder(model.wrapper)
-
-        def generate_custom_voice() -> Sample:
-            wavs, sample_rate = model.generate_custom_voice(
-                text,
-                language=language,
-                speaker=speaker,
-                max_new_tokens=max_new_tokens,
-            )
-            return Sample(_to_numpy(wavs[0]), sample_rate, {})
-
-        return generate_custom_voice, device, load_seconds, recorder
-
-    dtype = RUNTIME.resolved_dtype(device)
+    device = torch.device("cuda")
     start = time.perf_counter()
-    if checkpoint is None and not RUNTIME.checkpoint.exists():
-        # Source checkouts do not necessarily include the generated fixture.
-        model = Qwen3TTS.tiny(RUNTIME.seed).to(device=device, dtype=dtype).eval()
-    else:
-        config_path = path / "config.json"
-        weights_path = path / "model.pt"
-        if not config_path.is_file() or not weights_path.is_file():
-            raise click.ClickException(
-                f"{path} is not a Nero checkpoint; expected config.json and model.pt"
-            )
-        model = Qwen3TTS.from_checkpoint(path, device, dtype)
-    load_seconds = time.perf_counter() - start
-    frames = min(
-        RUNTIME.max_frames,
-        max(1, round(len(text) * RUNTIME.frames_per_character)),
+    model = Qwen3TTSModel.from_pretrained(
+        checkpoint or DEFAULT_MODEL,
+        device_map="cuda:0",
+        dtype=torch.bfloat16,
+        attn_implementation="sdpa",
     )
+    _synchronize(device)
+    load_seconds = time.perf_counter() - start
 
     def generate() -> Sample:
-        result = model.generate(text, frames)
-        return Sample(_to_numpy(result.audio[0]), result.sample_rate, result.timings)
+        wavs, sample_rate, timings = tts_infer(
+            model,
+            text,
+            language=language,
+            speaker=speaker,
+            max_new_tokens=max_new_tokens,
+        )
+        return Sample(_to_numpy(wavs[0]), sample_rate, timings)
 
     return generate, device, load_seconds, nullcontext()
 
@@ -346,8 +305,10 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 
 @click.command()
 @click.argument("text", default=DEFAULT_TEXT)
-@click.option("--backend", type=click.Choice(["nero", "official"]), default="nero")
-@click.option("--model", default=None, help="nero checkpoint or official model id")
+@click.option(
+    "--backend", type=click.Choice(["split", "official"]), default="split"
+)
+@click.option("--model", default=None, help="official qwen model id or path")
 @click.option("--lang", default="english")
 @click.option("--speaker", default="ryan")
 @click.option("--ref", type=click.Path(path_type=pl.Path, exists=True), default=None)
@@ -375,8 +336,8 @@ def main(
 ) -> None:
     """Profiles TEXT synthesis without including optional trace overhead."""
     torch.manual_seed(RUNTIME.seed)
-    if backend == "nero":
-        loaded = _load_nero(model, text, lang, speaker, max_new_tokens)
+    if backend == "split":
+        loaded = _load_split(model, text, lang, speaker, max_new_tokens)
     else:
         loaded = _load_official(
             model or DEFAULT_MODEL,
