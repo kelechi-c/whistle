@@ -5,10 +5,18 @@ official embeddings, forwards, dynamic caches, heads, and codec while keeping
 decode state and completed audio on-device.
 """
 
+from functools import cache
 import time
 
 from qwen_tts import Qwen3TTSModel
 import torch
+from transformers import StaticCache
+
+
+# Compiles only the predictor transformer and reuses its wrapper across requests.
+@cache
+def _compiled_predictor(model: torch.nn.Module) -> torch.nn.Module:
+    return torch.compile(model, mode="reduce-overhead")
 
 
 @torch.inference_mode()
@@ -112,6 +120,11 @@ def tts_infer(
         dim=1,
     )
     attention_mask = torch.ones(talker_input.shape[:2], device=device, dtype=torch.long)
+    prefill_length = talker_input.shape[1]
+    talker_cache = StaticCache(
+        config=talker.model.config,
+        max_cache_len=prefill_length + max_new_tokens - 1,
+    )
     talker.rope_deltas = None
     if phase_events is not None:
         phase_events[1].record()
@@ -125,7 +138,7 @@ def tts_infer(
     talker_output = talker(
         inputs_embeds=talker_input,
         attention_mask=attention_mask,
-        past_key_values=None,
+        past_key_values=talker_cache,
         past_hidden=None,
         trailing_text_hidden=tts_pad,
         tts_pad_embed=tts_pad,
@@ -135,7 +148,6 @@ def tts_infer(
     )
     code_vocab_size = predictor.config.vocab_size
     token = talker_output.logits[:, -1, :code_vocab_size].argmax(dim=-1)
-    talker_cache = talker_output.past_key_values
     past_hidden = talker_output.past_hidden
     if phase_events is not None:
         phase_events[2].record()
@@ -155,12 +167,25 @@ def tts_infer(
         device=device,
         dtype=past_hidden.dtype,
     )
-    predictor_model = predictor.model
+    predictor_model = _compiled_predictor(predictor.model)
     predictor_heads = predictor.lm_head
     predictor_projection = predictor.small_to_mtp_projection
     predictor_embedding_weights = torch.stack(tuple(x.weight for x in predictor.get_input_embeddings()))
     residual_indices = torch.arange(num_residuals, device=device)
-    prefill_length = talker_cache.get_seq_length()
+    predictor_cache = StaticCache(
+        config=predictor_model.config,
+        max_cache_len=num_residuals + 1,
+    )
+    predictor_config = predictor_model.config
+    predictor_cache.early_initialization(
+        batch_size=1,
+        num_heads=predictor_config.num_key_value_heads,
+        head_dim=predictor_config.head_dim,
+        dtype=next(predictor_model.parameters()).dtype,
+        device=device,
+    )
+    predictor_prefill_positions = torch.arange(2, device=device)
+    predictor_decode_positions = torch.arange(2, num_residuals + 1, device=device)
     cache_positions = torch.arange(
         prefill_length, prefill_length + max_new_tokens - 1, device=device
     )
@@ -173,9 +198,11 @@ def tts_infer(
         last_id_hidden = codec_embeddings(token.view(1, 1))
         predictor_input[:, :1].copy_(past_hidden)
         predictor_input[:, 1:].copy_(last_id_hidden)
+        predictor_cache.reset()
         predictor_output = predictor_model(
             inputs_embeds=predictor_projection(predictor_input),
-            past_key_values=None,
+            past_key_values=predictor_cache,
+            cache_position=predictor_prefill_positions,
             use_cache=True,
             return_dict=True,
         )
@@ -191,7 +218,10 @@ def tts_infer(
             ].unsqueeze(1)
             predictor_output = predictor_model(
                 inputs_embeds=predictor_projection(residual_hidden),
-                past_key_values=predictor_output.past_key_values,
+                past_key_values=predictor_cache,
+                cache_position=predictor_decode_positions[
+                    residual_index - 1 : residual_index
+                ],
                 use_cache=True,
                 return_dict=True,
             )
@@ -220,7 +250,6 @@ def tts_infer(
             return_dict=True,
         )
         past_hidden = backbone_output.last_hidden_state[:, -1:, :]
-        talker_cache = backbone_output.past_key_values
         token = talker.codec_head(past_hidden)[
             :, -1, :code_vocab_size
         ].argmax(dim=-1)
