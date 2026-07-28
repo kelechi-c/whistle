@@ -18,6 +18,7 @@ import torch
 from nero.config import DTypeChoice, DeviceChoice, RUNTIME
 
 CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+EventPair = tuple[torch.cuda.Event, torch.cuda.Event]
 
 
 def _synchronize(device: torch.device) -> None:
@@ -35,6 +36,7 @@ def tts_infer(
     language: str = "english",
     max_new_tokens: int = 256,
     min_new_tokens: int = 2,
+    profile_decode: bool = False,
 ) -> tuple[list[np.ndarray], int, dict[str, float]]:
     """Runs batch-one CustomVoice inference through explicit forward passes.
 
@@ -179,10 +181,23 @@ def tts_infer(
     phase_started = time.perf_counter()
     frames: list[torch.Tensor] = []
     predictor_embeddings = predictor.get_input_embeddings()
+    decode_events: dict[str, list[EventPair]] | None = (
+        {
+            "decode_predictor_seed": [],
+            "decode_predictor_residual": [],
+            "decode_talker": [],
+        }
+        if profile_decode and device.type == "cuda"
+        else None
+    )
     for frame_index in range(max_new_tokens):
         if int(token.item()) == eos_id:
             break
 
+        if decode_events is not None:
+            predictor_seed_start = torch.cuda.Event(enable_timing=True)
+            predictor_seed_end = torch.cuda.Event(enable_timing=True)
+            predictor_seed_start.record()
         last_id_hidden = codec_embeddings(token.view(1, 1))
         predictor_output = predictor(
             inputs_embeds=torch.cat([past_hidden, last_id_hidden], dim=1),
@@ -190,8 +205,17 @@ def tts_infer(
             use_cache=True,
             return_dict=True,
         )
+        if decode_events is not None:
+            predictor_seed_end.record()
+            decode_events["decode_predictor_seed"].append(
+                (predictor_seed_start, predictor_seed_end)
+            )
         residual = predictor_output.logits[:, -1, :].argmax(dim=-1)
         residual_codes = [residual]
+        if decode_events is not None:
+            predictor_residual_start = torch.cuda.Event(enable_timing=True)
+            predictor_residual_end = torch.cuda.Event(enable_timing=True)
+            predictor_residual_start.record()
         for _ in range(1, talker_config.num_code_groups - 1):
             predictor_output = predictor(
                 input_ids=residual.view(1, 1),
@@ -202,12 +226,21 @@ def tts_infer(
             )
             residual = predictor_output.logits[:, -1, :].argmax(dim=-1)
             residual_codes.append(residual)
+        if decode_events is not None:
+            predictor_residual_end.record()
+            decode_events["decode_predictor_residual"].append(
+                (predictor_residual_start, predictor_residual_end)
+            )
 
         residual_tensor = torch.stack(residual_codes, dim=1)
         frames.append(torch.cat([token.view(1, 1), residual_tensor], dim=1)[0])
         if frame_index + 1 == max_new_tokens:
             break
 
+        if decode_events is not None:
+            talker_start = torch.cuda.Event(enable_timing=True)
+            talker_end = torch.cuda.Event(enable_timing=True)
+            talker_start.record()
         frame_embeddings = [last_id_hidden]
         frame_embeddings.extend(
             embedding(residual_tensor[:, index : index + 1])
@@ -251,9 +284,21 @@ def tts_infer(
         if len(frames) < min_new_tokens:
             logits[:, eos_id] = -torch.inf
         token = logits.argmax(dim=-1)
+        if decode_events is not None:
+            talker_end.record()
+            decode_events["decode_talker"].append((talker_start, talker_end))
 
     _synchronize(device)
     decode_seconds = time.perf_counter() - phase_started
+    decode_parts: dict[str, float] = {}
+    if decode_events is not None:
+        decode_parts = {
+            name: sum(start.elapsed_time(end) for start, end in events) / 1000
+            for name, events in decode_events.items()
+        }
+        decode_parts["decode_overhead"] = max(
+            0.0, decode_seconds - sum(decode_parts.values())
+        )
     if not frames:
         raise RuntimeError("generation stopped before producing an audio frame")
     codes = torch.stack(frames)
@@ -270,7 +315,7 @@ def tts_infer(
         "codec": codec_seconds,
         "total": time.perf_counter() - started,
         "frames": float(codes.shape[0]),
-    }
+    } | decode_parts
     return wavs, sample_rate, timings
 
 

@@ -128,6 +128,8 @@ def _load_split(
     language: str,
     speaker: str,
     max_new_tokens: int,
+    fixed_tokens: bool,
+    decode_breakdown: bool,
 ) -> tuple[Generate, torch.device, float, AbstractContextManager[Any]]:
     """Loads the official model for the explicit greedy prefill/decode path."""
     if not torch.cuda.is_available():
@@ -152,8 +154,24 @@ def _load_split(
             language=language,
             speaker=speaker,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=max_new_tokens if fixed_tokens else 2,
+            profile_decode=decode_breakdown,
         )
-        return Sample(_to_numpy(wavs[0]), sample_rate, timings)
+        decode_names = (
+            (
+                "decode_predictor_seed",
+                "decode_predictor_residual",
+                "decode_talker",
+                "decode_overhead",
+            )
+            if decode_breakdown
+            else ("decode",)
+        )
+        phases = {
+            name: timings[name]
+            for name in ("prepare", "prefill", *decode_names, "codec")
+        }
+        return Sample(_to_numpy(wavs[0]), sample_rate, phases)
 
     return generate, device, load_seconds, nullcontext()
 
@@ -167,6 +185,7 @@ def _official_method(
     ref_audio: pl.Path | None,
     ref_text: str | None,
     max_new_tokens: int,
+    fixed_tokens: bool,
 ) -> Callable[[], tuple[Any, int]]:
     """Selects the official wrapper method from the checkpoint family name."""
     name = model_name.lower()
@@ -177,6 +196,8 @@ def _official_method(
         "do_sample": False,
         "subtalker_dosample": False,
     }
+    if fixed_tokens:
+        common["min_new_tokens"] = max_new_tokens
     if "voicedesign" in name:
         return lambda: wrapper.generate_voice_design(
             **common, instruct="normal speaking voice."
@@ -198,6 +219,7 @@ def _load_official(
     ref_audio: pl.Path | None,
     ref_text: str | None,
     max_new_tokens: int,
+    fixed_tokens: bool,
 ) -> tuple[Generate, torch.device, float, OfficialPhaseRecorder]:
     """Loads the production Qwen wrapper; CUDA is required to avoid CPU crashes."""
     if not torch.cuda.is_available():
@@ -223,6 +245,7 @@ def _load_official(
         ref_audio,
         ref_text,
         max_new_tokens,
+        fixed_tokens,
     )
     recorder = OfficialPhaseRecorder(wrapper)
 
@@ -306,6 +329,12 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.command()
 @click.argument("text", default=DEFAULT_TEXT)
 @click.option(
+    "--text-file",
+    type=click.Path(path_type=pl.Path, exists=True, dir_okay=False),
+    default=None,
+    help="read benchmark text from a utf-8 file",
+)
+@click.option(
     "--backend", type=click.Choice(["split", "official"]), default="split"
 )
 @click.option("--model", default=None, help="official qwen model id or path")
@@ -314,6 +343,8 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option("--ref", type=click.Path(path_type=pl.Path, exists=True), default=None)
 @click.option("--ref-text", default=None)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=512)
+@click.option("--fixed-tokens/--allow-eos", default=True, show_default=True)
+@click.option("--decode-breakdown/--no-decode-breakdown", default=False)
 @click.option("--iterations", type=click.IntRange(min=1), default=3)
 @click.option("--warmup", type=click.IntRange(min=0), default=1)
 @click.option("--out", type=click.Path(path_type=pl.Path), default=None)
@@ -321,6 +352,7 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option("--trace-out", type=click.Path(path_type=pl.Path), default=None)
 def main(
     text: str,
+    text_file: pl.Path | None,
     backend: Backend,
     model: str | None,
     lang: str,
@@ -328,6 +360,8 @@ def main(
     ref: pl.Path | None,
     ref_text: str | None,
     max_new_tokens: int,
+    fixed_tokens: bool,
+    decode_breakdown: bool,
     iterations: int,
     warmup: int,
     out: pl.Path | None,
@@ -335,9 +369,19 @@ def main(
     trace_out: pl.Path | None,
 ) -> None:
     """Profiles TEXT synthesis without including optional trace overhead."""
+    if text_file is not None:
+        text = text_file.read_text(encoding="utf-8")
     torch.manual_seed(RUNTIME.seed)
     if backend == "split":
-        loaded = _load_split(model, text, lang, speaker, max_new_tokens)
+        loaded = _load_split(
+            model,
+            text,
+            lang,
+            speaker,
+            max_new_tokens,
+            fixed_tokens,
+            decode_breakdown,
+        )
     else:
         loaded = _load_official(
             model or DEFAULT_MODEL,
@@ -347,6 +391,7 @@ def main(
             ref,
             ref_text,
             max_new_tokens,
+            fixed_tokens,
         )
     generate, device, load_seconds, instrumentation = loaded
     recorder = instrumentation if isinstance(instrumentation, OfficialPhaseRecorder) else None
@@ -356,10 +401,19 @@ def main(
         rows, sample = _benchmark(generate, device, iterations, warmup, recorder)
     mean_wall = statistics.mean(row.wall_seconds for row in rows)
     mean_rtf = statistics.mean(row.rtf for row in rows)
-    print(f"summary: mean wall {mean_wall:.3f}s; mean rtf {mean_rtf:.3f}")
+    p50_wall = statistics.median(row.wall_seconds for row in rows)
+    p50_rtf = statistics.median(row.rtf for row in rows)
+    print(
+        f"summary: p50 wall {p50_wall:.3f}s; p50 rtf {p50_rtf:.3f}; "
+        f"mean wall {mean_wall:.3f}s; mean rtf {mean_rtf:.3f}"
+    )
     phase_names = sorted({name for row in rows for name in row.phases})
     mean_phases = {
         name: statistics.mean(row.phases.get(name, 0.0) for row in rows)
+        for name in phase_names
+    }
+    p50_phases = {
+        name: statistics.median(row.phases.get(name, 0.0) for row in rows)
         for name in phase_names
     }
     if mean_phases:
@@ -368,6 +422,13 @@ def main(
             + ", ".join(
                 f"{name}={value * 1000:.2f}ms"
                 for name, value in mean_phases.items()
+            )
+        )
+        print(
+            "p50 phases: "
+            + ", ".join(
+                f"{name}={value * 1000:.2f}ms"
+                for name, value in p50_phases.items()
             )
         )
 
@@ -379,12 +440,20 @@ def main(
         payload = {
             "backend": backend,
             "model": model,
+            "text_file": str(text_file) if text_file is not None else None,
+            "text_characters": len(text),
+            "fixed_tokens": fixed_tokens,
+            "token_count": max_new_tokens,
+            "decode_breakdown": decode_breakdown,
             "load_seconds": load_seconds,
             "iterations": [asdict(row) for row in rows],
             "mean_wall_seconds": mean_wall,
             "mean_rtf": mean_rtf,
+            "p50_wall_seconds": p50_wall,
+            "p50_rtf": p50_rtf,
             "phase_semantics": "non_overlapping",
             "mean_phases": mean_phases,
+            "p50_phases": p50_phases,
         }
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
