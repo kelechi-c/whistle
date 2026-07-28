@@ -32,7 +32,7 @@ def tts_infer(
     tts: Qwen3TTSModel,
     text: str,
     *,
-    speaker: str = "ryan",
+    speaker: str = "serena",
     language: str = "english",
     max_new_tokens: int = 256,
     min_new_tokens: int = 2,
@@ -336,7 +336,7 @@ def _load_model(
 @click.command()
 @click.argument("text")
 @click.option("--checkpoint", default=CHECKPOINT, show_default=True)
-@click.option("--speaker", default="ryan", show_default=True)
+@click.option("--speaker", default="serena", show_default=True)
 @click.option("--language", default="english", show_default=True)
 @click.option("--max-frames", type=click.IntRange(min=1), default=RUNTIME.max_frames)
 @click.option(

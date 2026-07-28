@@ -95,6 +95,7 @@ class FasterDecodeTest(unittest.TestCase):
         wavs, sample_rate, timings = tts_infer(
             tts,
             "hi",
+            speaker="ryan",
             max_new_tokens=2,
             min_new_tokens=2,
         )

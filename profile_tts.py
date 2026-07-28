@@ -339,7 +339,7 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 )
 @click.option("--model", default=None, help="official qwen model id or path")
 @click.option("--lang", default="english")
-@click.option("--speaker", default="ryan")
+@click.option("--speaker", default="serena", show_default=True)
 @click.option("--ref", type=click.Path(path_type=pl.Path, exists=True), default=None)
 @click.option("--ref-text", default=None)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=512)
