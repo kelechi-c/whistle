@@ -1,30 +1,14 @@
-"""Unoptimized official Qwen3-TTS prefill/decode baseline.
+"""Low-overhead official Qwen3-TTS prefill/decode baseline.
 
 The hot path intentionally stays in one ``tts_infer`` function. It uses the
-official model's embeddings, transformer forwards, dynamic caches, heads, and
-codec so later optimizations can replace one clearly visible boundary at a time.
+official embeddings, forwards, dynamic caches, heads, and codec while keeping
+decode state and completed audio on-device.
 """
 
-from dataclasses import replace
-import pathlib as pl
 import time
 
-import click
-import numpy as np
 from qwen_tts import Qwen3TTSModel
-import soundfile as sf
 import torch
-
-from nero.config import DTypeChoice, DeviceChoice, RUNTIME
-
-CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
-EventPair = tuple[torch.cuda.Event, torch.cuda.Event]
-
-
-def _synchronize(device: torch.device) -> None:
-    """Makes phase timings include queued CUDA work."""
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
 
 
 @torch.inference_mode()
@@ -34,17 +18,18 @@ def tts_infer(
     *,
     speaker: str = "serena",
     language: str = "english",
-    max_new_tokens: int = 256,
-    min_new_tokens: int = 2,
-    profile_decode: bool = False,
-) -> tuple[list[np.ndarray], int, dict[str, float]]:
+    max_new_tokens: int = 1_280,
+) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
     """Runs batch-one CustomVoice inference through explicit forward passes.
 
     Prefill builds the complete non-streaming text/speaker prompt and fills the
-    talker's dynamic KV cache. Decode predicts codebook zero from the talker,
-    predicts the other codebooks with a fresh predictor cache for that frame,
-    then feeds the summed codec embeddings through one cached talker step.
+    talker's dynamic KV cache. Decode always emits ``max_new_tokens`` frames:
+    every token, codec-ID tensor, and waveform stays on-device until the caller
+    explicitly transfers the completed outputs.
     """
+    if max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be positive")
+
     started = time.perf_counter()
     model = tts.model
     talker = model.talker
@@ -52,6 +37,11 @@ def tts_infer(
     config = model.config
     talker_config = config.talker_config
     device = next(model.parameters()).device
+    cuda_timing = device.type == "cuda"
+    phase_events = [torch.cuda.Event(enable_timing=True) for _ in range(5)] if cuda_timing else None
+    if phase_events is not None:
+        phase_events[0].record()
+    cpu_phase_started = started
 
     tts._validate_languages([language])
     tts._validate_speakers([speaker])
@@ -73,17 +63,13 @@ def tts_infer(
     project_text = talker.text_projection
     token_dtype = input_ids.dtype
 
-    speaker_embed = codec_embeddings(
-        torch.tensor(speaker_id, device=device, dtype=token_dtype)
-    ).view(1, 1, -1)
+    speaker_embed = codec_embeddings(torch.tensor(speaker_id, device=device)).view(1, 1, -1)
     special_text = torch.tensor(
         [[config.tts_bos_token_id, config.tts_eos_token_id, config.tts_pad_token_id]],
         device=device,
         dtype=token_dtype,
     )
-    tts_bos, tts_eos, tts_pad = project_text(
-        text_embeddings(special_text)
-    ).chunk(3, dim=1)
+    tts_bos, tts_eos, tts_pad = project_text(text_embeddings(special_text)).chunk(3, dim=1)
 
     codec_prefix = (
         [
@@ -99,15 +85,9 @@ def tts_infer(
             talker_config.codec_think_eos_id,
         ]
     )
-    codec_prefix_ids = torch.tensor(
-        [codec_prefix],
-        device=device,
-        dtype=token_dtype,
-    )
+    codec_prefix_ids = torch.tensor([codec_prefix], device=device, dtype=token_dtype)
     codec_suffix_ids = torch.tensor(
-        [[talker_config.codec_pad_id, talker_config.codec_bos_id]],
-        device=device,
-        dtype=token_dtype,
+        [[talker_config.codec_pad_id, talker_config.codec_bos_id]], device=device
     )
     codec_prompt = torch.cat(
         [codec_embeddings(codec_prefix_ids), speaker_embed, codec_embeddings(codec_suffix_ids)],
@@ -115,13 +95,9 @@ def tts_infer(
     )
     role = project_text(text_embeddings(input_ids[:, :3]))
     codec_header = torch.cat(
-        [tts_pad.expand(-1, codec_prompt.shape[1] - 2, -1), tts_bos],
-        dim=1,
+        [tts_pad.expand(-1, codec_prompt.shape[1] - 2, -1), tts_bos], dim=1
     ) + codec_prompt[:, :-1]
-    spoken_text = torch.cat(
-        [project_text(text_embeddings(input_ids[:, 3:-5])), tts_eos],
-        dim=1,
-    )
+    spoken_text = torch.cat([project_text(text_embeddings(input_ids[:, 3:-5])), tts_eos], dim=1)
     codec_pad = codec_embeddings(
         torch.full(
             (1, spoken_text.shape[1]),
@@ -130,147 +106,114 @@ def tts_infer(
             dtype=token_dtype,
         )
     )
-    codec_bos = codec_embeddings(
-        torch.tensor(
-            [[talker_config.codec_bos_id]], device=device, dtype=token_dtype
-        )
-    )
+    codec_bos = codec_embeddings(torch.tensor([[talker_config.codec_bos_id]], device=device))
     talker_input = torch.cat(
         [role, codec_header, spoken_text + codec_pad, tts_pad + codec_bos],
         dim=1,
     )
-    attention_mask = torch.ones(
-        talker_input.shape[:2], device=device, dtype=torch.long
-    )
-    trailing_text = tts_pad
+    attention_mask = torch.ones(talker_input.shape[:2], device=device, dtype=torch.long)
     talker.rope_deltas = None
-    _synchronize(device)
-    prepare_seconds = time.perf_counter() - started
+    if phase_events is not None:
+        phase_events[1].record()
+        prepare_seconds = 0.0
+    else:
+        now = time.perf_counter()
+        prepare_seconds = now - cpu_phase_started
+        cpu_phase_started = now
 
     # === prefill: variable-length prompt, first codebook-zero token, dynamic KV ===
-    phase_started = time.perf_counter()
     talker_output = talker(
         inputs_embeds=talker_input,
         attention_mask=attention_mask,
         past_key_values=None,
         past_hidden=None,
-        trailing_text_hidden=trailing_text,
+        trailing_text_hidden=tts_pad,
         tts_pad_embed=tts_pad,
         generation_step=None,
         use_cache=True,
         return_dict=True,
     )
-    eos_id = talker_config.codec_eos_token_id
-    suppress = torch.zeros(
-        talker_config.vocab_size, device=device, dtype=torch.bool
-    )
-    suppress[predictor.config.vocab_size :] = True
-    suppress[eos_id] = False
-    first_logits = talker_output.logits[:, -1, :].clone()
-    first_logits[:, suppress] = -torch.inf
-    if min_new_tokens > 0:
-        first_logits[:, eos_id] = -torch.inf
-    token = first_logits.argmax(dim=-1)
+    code_vocab_size = predictor.config.vocab_size
+    token = talker_output.logits[:, -1, :code_vocab_size].argmax(dim=-1)
     talker_cache = talker_output.past_key_values
     past_hidden = talker_output.past_hidden
-    generation_step = int(talker_output.generation_step)
-    _synchronize(device)
-    prefill_seconds = time.perf_counter() - phase_started
+    if phase_events is not None:
+        phase_events[2].record()
+        prefill_seconds = 0.0
+    else:
+        now = time.perf_counter()
+        prefill_seconds = now - cpu_phase_started
+        cpu_phase_started = now
 
-    # === decode: predictor residual loop, then one cached talker forward per frame ===
-    phase_started = time.perf_counter()
-    frames: list[torch.Tensor] = []
-    predictor_embeddings = predictor.get_input_embeddings()
-    decode_events: dict[str, list[EventPair]] | None = (
-        {
-            "decode_predictor_seed": [],
-            "decode_predictor_residual": [],
-            "decode_talker": [],
-        }
-        if profile_decode and device.type == "cuda"
-        else None
+    # === decode: fixed GPU buffers, predictor residuals, cached talker forwards ===
+    num_code_groups = talker_config.num_code_groups
+    num_residuals = num_code_groups - 1
+    codes = torch.empty((max_new_tokens, num_code_groups), device=device, dtype=torch.long)
+    residual_codes = torch.empty((1, num_residuals), device=device, dtype=torch.long)
+    predictor_input = torch.empty(
+        (1, 2, talker_config.hidden_size),
+        device=device,
+        dtype=past_hidden.dtype,
     )
+    predictor_model = predictor.model
+    predictor_heads = predictor.lm_head
+    predictor_projection = predictor.small_to_mtp_projection
+    predictor_embedding_weights = torch.stack(tuple(x.weight for x in predictor.get_input_embeddings()))
+    residual_indices = torch.arange(num_residuals, device=device)
+    prefill_length = talker_cache.get_seq_length()
+    cache_positions = torch.arange(
+        prefill_length, prefill_length + max_new_tokens - 1, device=device
+    )
+    position_ids = (
+        cache_positions.to(talker.rope_deltas.dtype).view(1, -1)
+        + talker.rope_deltas
+    ).unsqueeze(0).expand(3, -1, -1)
+    
     for frame_index in range(max_new_tokens):
-        if int(token.item()) == eos_id:
-            break
-
-        if decode_events is not None:
-            predictor_seed_start = torch.cuda.Event(enable_timing=True)
-            predictor_seed_end = torch.cuda.Event(enable_timing=True)
-            predictor_seed_start.record()
         last_id_hidden = codec_embeddings(token.view(1, 1))
-        predictor_output = predictor(
-            inputs_embeds=torch.cat([past_hidden, last_id_hidden], dim=1),
+        predictor_input[:, :1].copy_(past_hidden)
+        predictor_input[:, 1:].copy_(last_id_hidden)
+        predictor_output = predictor_model(
+            inputs_embeds=predictor_projection(predictor_input),
             past_key_values=None,
             use_cache=True,
             return_dict=True,
         )
-        if decode_events is not None:
-            predictor_seed_end.record()
-            decode_events["decode_predictor_seed"].append(
-                (predictor_seed_start, predictor_seed_end)
-            )
-        residual = predictor_output.logits[:, -1, :].argmax(dim=-1)
-        residual_codes = [residual]
-        if decode_events is not None:
-            predictor_residual_start = torch.cuda.Event(enable_timing=True)
-            predictor_residual_end = torch.cuda.Event(enable_timing=True)
-            predictor_residual_start.record()
-        for _ in range(1, talker_config.num_code_groups - 1):
-            predictor_output = predictor(
-                input_ids=residual.view(1, 1),
+        residual = predictor_heads[0](
+            predictor_output.last_hidden_state[:, -1, :]
+        ).argmax(dim=-1)
+        residual_codes[:, 0].copy_(residual)
+
+        # code predicctor phase/steps
+        for residual_index in range(1, num_residuals):
+            residual_hidden = predictor_embedding_weights[
+                residual_index - 1, residual
+            ].unsqueeze(1)
+            predictor_output = predictor_model(
+                inputs_embeds=predictor_projection(residual_hidden),
                 past_key_values=predictor_output.past_key_values,
-                generation_steps=predictor_output.generation_steps,
                 use_cache=True,
                 return_dict=True,
             )
-            residual = predictor_output.logits[:, -1, :].argmax(dim=-1)
-            residual_codes.append(residual)
-        if decode_events is not None:
-            predictor_residual_end.record()
-            decode_events["decode_predictor_residual"].append(
-                (predictor_residual_start, predictor_residual_end)
-            )
-
-        residual_tensor = torch.stack(residual_codes, dim=1)
-        frames.append(torch.cat([token.view(1, 1), residual_tensor], dim=1)[0])
+            residual = predictor_heads[residual_index](
+                predictor_output.last_hidden_state[:, -1, :]
+            ).argmax(dim=-1)
+            residual_codes[:, residual_index].copy_(residual)
+            
+        codes[frame_index, 0].copy_(token[0])
+        codes[frame_index, 1:].copy_(residual_codes[0])
         if frame_index + 1 == max_new_tokens:
             break
 
-        if decode_events is not None:
-            talker_start = torch.cuda.Event(enable_timing=True)
-            talker_end = torch.cuda.Event(enable_timing=True)
-            talker_start.record()
-        frame_embeddings = [last_id_hidden]
-        frame_embeddings.extend(
-            embedding(residual_tensor[:, index : index + 1])
-            for index, embedding in enumerate(predictor_embeddings)
-        )
-        talker_input = torch.cat(frame_embeddings, dim=1).sum(dim=1, keepdim=True)
-        conditioning = (
-            trailing_text[:, generation_step : generation_step + 1]
-            if generation_step < trailing_text.shape[1]
-            else tts_pad
-        )
-        talker_input = talker_input + conditioning
-
-        cache_position = torch.tensor(
-            [talker_cache.get_seq_length()], device=device, dtype=torch.long
-        )
-        attention_mask = torch.cat(
-            [
-                attention_mask,
-                torch.ones((1, 1), device=device, dtype=attention_mask.dtype),
-            ],
-            dim=1,
-        )
-        position_ids = (
-            cache_position[0] + talker.rope_deltas
-        ).unsqueeze(0).expand(3, -1, -1)
+        residual_hidden = predictor_embedding_weights[
+            residual_indices, residual_codes[0]
+        ].sum(dim=0).view(1, 1, -1)
+        talker_input = last_id_hidden + residual_hidden + tts_pad
+        cache_position = cache_positions[frame_index : frame_index + 1]
         backbone_output = talker.model(
             inputs_embeds=talker_input,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
+            attention_mask=None,
+            position_ids=position_ids[:, :, frame_index : frame_index + 1],
             past_key_values=talker_cache,
             cache_position=cache_position,
             use_cache=True,
@@ -278,130 +221,50 @@ def tts_infer(
         )
         past_hidden = backbone_output.last_hidden_state[:, -1:, :]
         talker_cache = backbone_output.past_key_values
-        generation_step += 1
-        logits = talker.codec_head(past_hidden)[:, -1, :].clone()
-        logits[:, suppress] = -torch.inf
-        if len(frames) < min_new_tokens:
-            logits[:, eos_id] = -torch.inf
-        token = logits.argmax(dim=-1)
-        if decode_events is not None:
-            talker_end.record()
-            decode_events["decode_talker"].append((talker_start, talker_end))
+        token = talker.codec_head(past_hidden)[
+            :, -1, :code_vocab_size
+        ].argmax(dim=-1)
 
-    _synchronize(device)
-    decode_seconds = time.perf_counter() - phase_started
-    decode_parts: dict[str, float] = {}
-    if decode_events is not None:
-        decode_parts = {
-            name: sum(start.elapsed_time(end) for start, end in events) / 1000
-            for name, events in decode_events.items()
-        }
-        decode_parts["decode_overhead"] = max(
-            0.0, decode_seconds - sum(decode_parts.values())
-        )
-    if not frames:
-        raise RuntimeError("generation stopped before producing an audio frame")
-    codes = torch.stack(frames)
+    if phase_events is not None:
+        phase_events[3].record()
+        decode_seconds = 0.0
+    else:
+        now = time.perf_counter()
+        decode_seconds = now - cpu_phase_started
+        cpu_phase_started = now
 
-    # === codec: unchanged official 12 Hz codes-to-waveform decoder ===
-    phase_started = time.perf_counter()
-    wavs, sample_rate = model.speech_tokenizer.decode([{"audio_codes": codes}])
-    _synchronize(device)
-    codec_seconds = time.perf_counter() - phase_started
+    # === codec: fixed GPU output, no official wrapper CPU conversion/list concat ===
+    speech_model = model.speech_tokenizer.model
+    decoder = speech_model.decoder
+    upsample = int(decoder.total_upsample)
+    codec_input = codes.unsqueeze(0).transpose(1, 2)
+    waveform = torch.empty((1, max_new_tokens * upsample), device=device, dtype=tts_pad.dtype)
+    chunk_size = 300
+    left_context = 25
+    for start_index in range(0, max_new_tokens, chunk_size):
+        end_index = min(start_index + chunk_size, max_new_tokens)
+        context_start = max(0, start_index - left_context)
+        decoded = decoder(codec_input[..., context_start:end_index]).squeeze(1)
+        decoded = decoded[..., (start_index - context_start) * upsample :]
+        decoded = decoded[..., : (end_index - start_index) * upsample]
+        waveform[:, start_index * upsample : end_index * upsample].copy_(decoded)
+
+    if phase_events is not None:
+        phase_events[4].record()
+        phase_events[4].synchronize()
+        prepare_seconds = phase_events[0].elapsed_time(phase_events[1]) / 1000
+        prefill_seconds = phase_events[1].elapsed_time(phase_events[2]) / 1000
+        decode_seconds = phase_events[2].elapsed_time(phase_events[3]) / 1000
+        codec_seconds = phase_events[3].elapsed_time(phase_events[4]) / 1000
+    else:
+        codec_seconds = time.perf_counter() - cpu_phase_started
+    total_seconds = time.perf_counter() - started
     timings = {
         "prepare": prepare_seconds,
         "prefill": prefill_seconds,
         "decode": decode_seconds,
         "codec": codec_seconds,
-        "total": time.perf_counter() - started,
-        "frames": float(codes.shape[0]),
-    } | decode_parts
-    return wavs, sample_rate, timings
-
-
-def _load_model(
-    checkpoint: str,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> Qwen3TTSModel:
-    """Loads the official wrapper outside the measured inference path."""
-    return Qwen3TTSModel.from_pretrained(
-        checkpoint,
-        device_map=str(device),
-        dtype=dtype,
-        attn_implementation="sdpa",
-    )
-
-
-@click.command()
-@click.argument("text")
-@click.option("--checkpoint", default=CHECKPOINT, show_default=True)
-@click.option("--speaker", default="serena", show_default=True)
-@click.option("--language", default="english", show_default=True)
-@click.option("--max-frames", type=click.IntRange(min=1), default=RUNTIME.max_frames)
-@click.option(
-    "--device",
-    "device_choice",
-    type=click.Choice(["auto", "cpu", "cuda"]),
-    default=RUNTIME.device,
-    show_default=True,
-)
-@click.option(
-    "--dtype",
-    "dtype_choice",
-    type=click.Choice(["float32", "float16", "bfloat16"]),
-    default=RUNTIME.dtype,
-    show_default=True,
-)
-@click.option(
-    "--out",
-    type=click.Path(path_type=pl.Path),
-    default=RUNTIME.output,
-    show_default=True,
-)
-def main(
-    text: str,
-    checkpoint: str,
-    speaker: str,
-    language: str,
-    max_frames: int,
-    device_choice: DeviceChoice,
-    dtype_choice: DTypeChoice,
-    out: pl.Path,
-) -> None:
-    """Runs the explicit official Qwen3-TTS baseline for TEXT."""
-    runtime = replace(
-        RUNTIME,
-        device=device_choice,
-        dtype=dtype_choice,
-        max_frames=max_frames,
-        output=out,
-    )
-    device = runtime.resolved_device()
-    dtype = runtime.resolved_dtype(device)
-    torch.manual_seed(runtime.seed)
-    model = _load_model(checkpoint, device, dtype)
-    wavs, sample_rate, timings = tts_infer(
-        model,
-        text,
-        speaker=speaker,
-        language=language,
-        max_new_tokens=max_frames,
-    )
-    out.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(out, wavs[0], sample_rate)
-    print(f"audio saved to {out}")
-    print(
-        f"frames: {int(timings['frames'])}; "
-        f"prefill: {timings['prefill'] * 1000:.2f} ms; "
-        f"decode: {timings['decode'] * 1000:.2f} ms"
-    )
-    print(
-        f"prepare: {timings['prepare'] * 1000:.2f} ms; "
-        f"codec: {timings['codec'] * 1000:.2f} ms; "
-        f"total: {timings['total']:.3f} s"
-    )
-
-
-if __name__ == "__main__":
-    main()
+        "total": total_seconds,
+        "frames": float(max_new_tokens),
+    }
+    return waveform, codes, int(speech_model.get_output_sample_rate()), timings
