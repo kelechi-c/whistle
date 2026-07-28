@@ -146,6 +146,8 @@ def _load_split(
     )
     _synchronize(device)
     load_seconds = time.perf_counter() - start
+    # Match official fixed generation: N talker tokens yield N-1 complete frames.
+    frame_budget = max_new_tokens - 1 if fixed_tokens else max_new_tokens
 
     def generate() -> Sample:
         wavs, sample_rate, timings = tts_infer(
@@ -153,8 +155,8 @@ def _load_split(
             text,
             language=language,
             speaker=speaker,
-            max_new_tokens=max_new_tokens,
-            min_new_tokens=max_new_tokens if fixed_tokens else 2,
+            max_new_tokens=frame_budget,
+            min_new_tokens=frame_budget if fixed_tokens else 2,
             profile_decode=decode_breakdown,
         )
         decode_names = (
@@ -444,6 +446,7 @@ def main(
             "text_characters": len(text),
             "fixed_tokens": fixed_tokens,
             "token_count": max_new_tokens,
+            "expected_codec_frames": max_new_tokens - 1 if fixed_tokens else None,
             "decode_breakdown": decode_breakdown,
             "load_seconds": load_seconds,
             "iterations": [asdict(row) for row in rows],
