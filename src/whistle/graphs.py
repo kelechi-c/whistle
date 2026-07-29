@@ -4,7 +4,7 @@ from functools import cache
 from typing import Any, TypeAlias
 
 import torch
-from transformers import StaticCache
+from transformers import DynamicCache, StaticCache
 from transformers.masking_utils import (
     create_causal_mask,
     create_sliding_window_causal_mask,
@@ -151,7 +151,16 @@ class PredictorGraph:
 
 
 class TalkerGraph:
-    """Owns fixed talker KV storage, masks, and one-token graph buffers."""
+    """Dynamic-cache eager one-token talker decode.
+
+    Uses DynamicCache so KV holds only populated slots and SDPA takes the
+    mask-free flash path (q_len=1, no padding, is_compileable=False). This is
+    the correct eager baseline. A StaticCache here needs an explicit mask to
+    zero the un-populated slots; passing attention_mask=None on a StaticCache
+    makes SDPA attend over zero-padded KV and degenerates to silence. No CUDA
+    graph: DynamicCache.update concatenates per step, so KV addresses change
+    every frame and cannot be captured.
+    """
 
     def __init__(
         self,
@@ -163,67 +172,17 @@ class TalkerGraph:
         self.model = model
         self.device = device
         self.max_cache_len = max_cache_len
-        config = model.config
-        self.cache = StaticCache(config=config, max_cache_len=max_cache_len)
-        self.cache.early_initialization(
-            1, config.num_key_value_heads, config.head_dim, dtype, device
-        )
-        self.inputs = torch.zeros((1, 1, config.hidden_size), device=device, dtype=dtype)
-        self.output = torch.zeros_like(self.inputs)
-        self.cache_position = torch.zeros(1, device=device, dtype=torch.long)
-        self.position_ids = torch.zeros((3, 1, 1), device=device, dtype=torch.float32)
+        self.cache = DynamicCache(config=model.config)
         self.rope_deltas = torch.zeros((1, 1), device=device, dtype=torch.float32)
-        dummy = torch.zeros_like(self.inputs)
-        mask_name = (
-            "sliding_attention"
-            if getattr(config, "sliding_window", None) is not None
-            else "full_attention"
-        )
-        self.mask_table = tuple(
-            _masks(model, dummy, torch.tensor([index], device=device), self.cache)[
-                mask_name
-            ]
-            for index in range(max_cache_len)
-        )
-        self.mask = self.mask_table[0].clone()
-        self.graph: torch.cuda.CUDAGraph | None = None
-
-    def _step(self) -> None:
-        hidden = self.model(
-            inputs_embeds=self.inputs,
-            attention_mask=self.mask,
-            position_ids=self.position_ids,
-            past_key_values=self.cache,
-            cache_position=self.cache_position,
-            use_cache=True,
-            return_dict=True,
-        ).last_hidden_state
-        self.output.copy_(hidden)
 
     def capture(self) -> None:
-        """Captures one fixed-shape token forward after eager warmups."""
-        if self.device.type != "cuda" or self.graph is not None:
-            return
-        stream = torch.cuda.Stream(device=self.device)
-        stream.wait_stream(torch.cuda.current_stream(self.device))
-        with torch.cuda.stream(stream):
-            for _ in range(3):
-                self.cache.reset()
-                self._step()
-        stream.synchronize()
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.stream(stream):
-            self.cache.reset()
-            with torch.cuda.graph(self.graph):
-                self._step()
-        torch.cuda.current_stream(self.device).wait_stream(stream)
-        self.cache.reset()
+        """No-op: the talker runs eager with a growing dynamic cache."""
 
     def reset(self, prompt_length: int, rope_deltas: torch.Tensor | None = None) -> None:
-        """Clears request KV state and validates the fixed cache budget."""
+        """Rebuilds the dynamic cache for a new request and validates the budget."""
         if prompt_length >= self.max_cache_len:
             raise ValueError("prompt exceeds the fixed talker cache capacity")
-        self.cache.reset()
+        self.cache = DynamicCache(config=self.model.config)
         self.rope_deltas.zero_()
         if rope_deltas is not None:
             self.rope_deltas.copy_(rope_deltas)
@@ -233,19 +192,21 @@ class TalkerGraph:
         self.rope_deltas.copy_(rope_deltas)
 
     def run(self, inputs: torch.Tensor, position: int) -> torch.Tensor:
-        """Updates values in fixed buffers and replays one talker token."""
+        """Runs one eager talker forward, growing the cache; returns [1, 1, H]."""
         if position >= self.max_cache_len:
             raise ValueError("decode exceeds the fixed talker cache capacity")
-        self.inputs.copy_(inputs)
-        self.cache_position.fill_(position)
-        position_ids = self.rope_deltas + self.cache_position.to(self.rope_deltas.dtype)
-        self.position_ids.copy_(position_ids.unsqueeze(0).expand(3, -1, -1))
-        self.mask.copy_(self.mask_table[position])
-        if self.graph is None:
-            self._step()
-        else:
-            self.graph.replay()
-        return self.output
+        cache_position = torch.tensor([position], device=self.device, dtype=torch.long)
+        position_ids = self.rope_deltas + cache_position.to(self.rope_deltas.dtype)
+        position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        return self.model(
+            inputs_embeds=inputs,
+            attention_mask=None,
+            position_ids=position_ids,
+            past_key_values=self.cache,
+            cache_position=cache_position,
+            use_cache=True,
+            return_dict=True,
+        ).last_hidden_state
 
 
 class DecodeGraphs:

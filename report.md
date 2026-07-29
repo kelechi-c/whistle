@@ -18,7 +18,7 @@ RTX 3050 6 GB Laptop GPU.
 | V3 | Static caches and torch-compiled predictor | 57.477 s | 0.562 | 15.44% |
 | A/B candidate | V3 with dynamic talker cache | 50.011 s | 0.489 | 12.91% |
 | V4 | CUDA graphs for predictor loop and talker pass | 64.431 s | 0.630 | −28.83% vs candidate |
-| V5 | Compiled predictor loop and talker graph | 48.106 s | 0.470 | 25.33% vs V4 |
+| V5 | Compiled predictor loop and talker graph | 48.106 s | 0.470 | 25.33% vs V4 (invalid) |
 | V5.1 | Explicit-mask talker graph | 64.188 s | 0.627 | −33.43% vs V5 |
 
 V1 exposed the predictor and talker forwards instead of relying on nested
@@ -33,8 +33,14 @@ replay, but latency regressed.
 
 V5 disabled explicit predictor graph capture and compiled the complete
 predictor loop with `torch.compile(mode="reduce-overhead")`; the talker graph
-remained captured. It is the fastest measured configuration at 48.106 seconds
-p50, 1.906× faster than official.
+remained captured. **V5 is invalidated.** Its talker graph set
+`StaticCache.is_compileable = False` per layer and passed `attention_mask=None`,
+which re-enables SDPA's mask-free causal skip on a zero-padded static cache:
+SDPA then attends over all 1,432 KV slots (mostly zeros) with `is_causal=False`,
+the attention output attenuates toward zero, and the generated codes degenerate
+to silence after ~2 seconds. The 15.452-second talker time and 48.106-second
+headline measure broken output, not a real win. The compiled predictor half is
+correct and retained.
 
 V5.1 adds an explicit causal mask to the talker graph. It requires three full
 excluded warmups to remove a late setup pass, then stabilizes at 64.188 seconds
@@ -77,14 +83,18 @@ mask increases total decode from 46.211 to 62.090 seconds; predictor rises
 
 ## Conclusion
 
-Static cache is beneficial for the compiled predictor but currently harmful
-for the eager talker. The best measured configuration is a compiled
-static-cache predictor with a dynamic talker cache: 50.011 seconds p50,
-1.834× faster than the official baseline. Static talker cache should return
-only when the talker forward is compiled or CUDA-graph captured so fixed
-addresses and shapes can offset its larger attention extent. V4 shows that
-capture alone is insufficient: the next experiment should capture a compiled
-full-frame predictor and avoid full-capacity talker attention. V5 effectively
-validates the first half of that direction: preserve the compiler-managed
-predictor graph tree rather than replacing it with an eager CUDA graph.
-The explicit-mask talker path should remain disabled for this workload.
+Static cache is beneficial for the compiled predictor but harmful for the eager
+talker. The best *correct* measured configuration is a compiled static-cache
+predictor with a dynamic talker cache: the A/B candidate at 50.011 seconds p50,
+1.834× faster than the official baseline. V5's 48.106-second result is invalid
+(silence after ~2 s from the `is_compileable=False` + `attention_mask=None`
+talker bug); V5.1's explicit-mask talker is correct but slow (64.188 s).
+
+The current code reverts the talker to dynamic-eager (`DynamicCache`, no graph)
+on top of the compiled predictor loop — the correct A/B configuration — so the
+trustworthy baseline is restored. The next experiment should compile the talker
+(or the full frame) with `torch.compile(mode="max-autotune-no-cudagraphs")`,
+which lets Inductor own the mask + fusion without conflicting with a manual
+CUDA graph. Manual `torch.cuda.graph` capture of the talker is a dead end on a
+`StaticCache` (explicit mask is slow; no mask is incorrect), and `DynamicCache`
+cannot be captured because its KV addresses change every step.

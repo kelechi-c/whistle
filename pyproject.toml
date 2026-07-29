@@ -1,7 +1,7 @@
 [project]
 name = "whistle"
 version = "0.1.0"
-description = "Add your description here"
+description = "Low-latency Qwen3 speech inference experiments"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,3 +9,13 @@ dependencies = [
     "qwen-tts>=0.1",
     "soundfile>=0.14.0",
 ]
+
+[project.scripts]
+whistle = "whistle.infer:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

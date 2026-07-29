@@ -478,6 +478,16 @@ PYTHONPATH=src uv run --no-sync python profile_tts.py \
 V5 is 25.33% lower latency than v4, 3.80% lower than the mixed-cache A/B
 candidate, and 47.55% lower than official inference (1.906× speedup).
 
+> **Invalidated (correctness).** The v5 talker graph set
+> `StaticCache.is_compileable = False` per layer and passed `attention_mask=None`,
+> which re-enables SDPA's mask-free causal skip on a zero-padded static cache.
+> SDPA then attends over all 1,432 KV slots (mostly zeros) with `is_causal=False`,
+> the attention output attenuates toward zero, and generated codes degenerate to
+> silence after ~2 seconds of audio. The 15.452-second talker time and 48.106-second
+> headline measure broken output, not a real win. The compiled-predictor half is
+> correct and retained. The trustworthy correct best remains the A/B candidate
+> (50.011 s); the talker has been reverted to dynamic-eager `DynamicCache`.
+
 ### Modular breakdown
 
 | Decode module | Calls | p50 latency | Share of decode | Average |
@@ -550,8 +560,12 @@ The modular run uses the same three excluded warmups.
 | **Total decode** | — | **62.090 s** | **100%** | — |
 
 Compared with V5, the predictor loop rises 9.36%, while the explicit-mask
-talker graph rises 84.18% (15.452 to 28.459 seconds). The talker regression is
-the main reason this version should not replace V5. The reports are
+talker graph rises 84.18% (15.452 to 28.459 seconds). Since V5 is invalidated
+(silence from the un-masked static-cache talker), V5.1 is the correct
+graphed-talker configuration — but its explicit-mask SDPA path is slower than
+the dynamic-eager A/B talker (18.685 s). The talker has therefore been reverted
+to dynamic-eager `DynamicCache` (no graph); the current correct baseline is the
+A/B candidate (50.011 s) with the compiled predictor loop retained. The reports are
 [`benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json)
 and
 [`benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json).

@@ -13,8 +13,8 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from faster_decode import tts_infer
-from nero.config import RUNTIME
+from whistle.config import RUNTIME
+from whistle.inference import tts_infer
 
 Backend = Literal["split", "official"]
 Audio = np.ndarray | torch.Tensor
