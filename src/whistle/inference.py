@@ -10,7 +10,7 @@ import time
 from qwen_tts import Qwen3TTSModel
 import torch
 
-from whistle.graphs import decode_graphs
+from whistle.graphs import TalkerMode, decode_graphs
 
 MAX_CACHE_LEN = 2_048
 
@@ -23,6 +23,7 @@ def tts_infer(
     speaker: str = "serena",
     language: str = "english",
     max_new_tokens: int = 1_280,
+    talker_mode: TalkerMode = "compile",
 ) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
     """Runs batch-one CustomVoice inference through explicit forward passes.
 
@@ -119,7 +120,7 @@ def tts_infer(
     prefill_length = talker_input.shape[1]
     if prefill_length + max_new_tokens - 1 > MAX_CACHE_LEN:
         raise ValueError("prompt and frames exceed the fixed talker cache capacity")
-    graphs = decode_graphs(talker, MAX_CACHE_LEN)
+    graphs = decode_graphs(talker, MAX_CACHE_LEN, talker_mode)
     graphs.talker.reset(prefill_length)
     talker.rope_deltas = None
     if phase_events is not None:

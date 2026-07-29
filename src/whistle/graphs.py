@@ -1,16 +1,17 @@
 """Static-cache eager/CUDA-graph decode blocks for Whistle Qwen3-TTS."""
 
 from functools import cache
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import torch
-from transformers import DynamicCache, StaticCache
+from transformers import StaticCache
 from transformers.masking_utils import (
     create_causal_mask,
     create_sliding_window_causal_mask,
 )
 
 Masks: TypeAlias = dict[str, torch.Tensor]
+TalkerMode: TypeAlias = Literal["compile", "cuda-graph"]
 
 
 def _masks(
@@ -79,6 +80,32 @@ def predictor_loop(
 
 
 compiled_predictor_loop = torch.compile(predictor_loop, mode="reduce-overhead")
+
+
+def talker_step(
+    model: Any,
+    inputs: torch.Tensor,
+    mask: torch.Tensor,
+    position_ids: torch.Tensor,
+    cache: StaticCache,
+    cache_position: torch.Tensor,
+) -> torch.Tensor:
+    """Runs one inner-talker token with explicit fixed-cache state."""
+    return model(
+        inputs_embeds=inputs,
+        attention_mask=mask,
+        position_ids=position_ids,
+        past_key_values=cache,
+        cache_position=cache_position,
+        use_cache=True,
+        return_dict=True,
+    ).last_hidden_state
+
+
+compiled_talker_step = torch.compile(talker_step, mode="reduce-overhead")
+graphable_talker_step = torch.compile(
+    talker_step, mode="max-autotune-no-cudagraphs"
+)
 
 
 class PredictorGraph:
@@ -151,16 +178,7 @@ class PredictorGraph:
 
 
 class TalkerGraph:
-    """Dynamic-cache eager one-token talker decode.
-
-    Uses DynamicCache so KV holds only populated slots and SDPA takes the
-    mask-free flash path (q_len=1, no padding, is_compileable=False). This is
-    the correct eager baseline. A StaticCache here needs an explicit mask to
-    zero the un-populated slots; passing attention_mask=None on a StaticCache
-    makes SDPA attend over zero-padded KV and degenerates to silence. No CUDA
-    graph: DynamicCache.update concatenates per step, so KV addresses change
-    every frame and cannot be captured.
-    """
+    """Owns the fixed buffers for compiled or manually graphed talker decode."""
 
     def __init__(
         self,
@@ -168,21 +186,80 @@ class TalkerGraph:
         device: torch.device,
         dtype: torch.dtype,
         max_cache_len: int,
+        mode: TalkerMode,
     ) -> None:
         self.model = model
         self.device = device
         self.max_cache_len = max_cache_len
-        self.cache = DynamicCache(config=model.config)
+        self.mode = mode
+        config = model.config
+        self.cache = StaticCache(config=config, max_cache_len=max_cache_len)
+        self.cache.early_initialization(
+            1, config.num_key_value_heads, config.head_dim, dtype, device
+        )
+        self.inputs = torch.zeros((1, 1, config.hidden_size), device=device, dtype=dtype)
+        self.output = torch.zeros_like(self.inputs)
+        self.cache_position = torch.zeros(1, device=device, dtype=torch.long)
+        self.position_ids = torch.zeros((3, 1, 1), device=device, dtype=torch.float32)
         self.rope_deltas = torch.zeros((1, 1), device=device, dtype=torch.float32)
+        dummy = torch.zeros_like(self.inputs)
+        mask_name = (
+            "sliding_attention"
+            if getattr(config, "sliding_window", None) is not None
+            else "full_attention"
+        )
+        self.mask_table = tuple(
+            _masks(model, dummy, torch.tensor([index], device=device), self.cache)[
+                mask_name
+            ]
+            for index in range(max_cache_len)
+        )
+        self.mask = self.mask_table[0].clone()
+        if device.type != "cuda":
+            self.step = talker_step
+        elif mode == "compile":
+            self.step = compiled_talker_step
+        else:
+            self.step = graphable_talker_step
+        self.graph: torch.cuda.CUDAGraph | None = None
+
+    def _step(self) -> None:
+        """Runs the selected callable into the stable output buffer."""
+        hidden = self.step(
+            self.model,
+            self.inputs,
+            self.mask,
+            self.position_ids,
+            self.cache,
+            self.cache_position,
+        )
+        self.output.copy_(hidden)
 
     def capture(self) -> None:
-        """No-op: the talker runs eager with a growing dynamic cache."""
+        """Warms compilation and optionally wraps the callable in a CUDA graph."""
+        if self.device.type != "cuda":
+            return
+        for _ in range(3):
+            self.cache.reset()
+            self._step()
+        torch.cuda.synchronize(self.device)
+        self.cache.reset()
+        if self.mode == "compile":
+            return
+        stream = torch.cuda.Stream(device=self.device)
+        stream.wait_stream(torch.cuda.current_stream(self.device))
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.stream(stream):
+            with torch.cuda.graph(self.graph):
+                self._step()
+        torch.cuda.current_stream(self.device).wait_stream(stream)
+        self.cache.reset()
 
     def reset(self, prompt_length: int, rope_deltas: torch.Tensor | None = None) -> None:
-        """Rebuilds the dynamic cache for a new request and validates the budget."""
+        """Clears request KV state and validates the fixed cache budget."""
         if prompt_length >= self.max_cache_len:
             raise ValueError("prompt exceeds the fixed talker cache capacity")
-        self.cache = DynamicCache(config=self.model.config)
+        self.cache.reset()
         self.rope_deltas.zero_()
         if rope_deltas is not None:
             self.rope_deltas.copy_(rope_deltas)
@@ -192,33 +269,38 @@ class TalkerGraph:
         self.rope_deltas.copy_(rope_deltas)
 
     def run(self, inputs: torch.Tensor, position: int) -> torch.Tensor:
-        """Runs one eager talker forward, growing the cache; returns [1, 1, H]."""
+        """Updates fixed inputs and runs one compiled or graphed talker token."""
         if position >= self.max_cache_len:
             raise ValueError("decode exceeds the fixed talker cache capacity")
-        cache_position = torch.tensor([position], device=self.device, dtype=torch.long)
-        position_ids = self.rope_deltas + cache_position.to(self.rope_deltas.dtype)
-        position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
-        return self.model(
-            inputs_embeds=inputs,
-            attention_mask=None,
-            position_ids=position_ids,
-            past_key_values=self.cache,
-            cache_position=cache_position,
-            use_cache=True,
-            return_dict=True,
-        ).last_hidden_state
+        self.inputs.copy_(inputs)
+        self.cache_position.fill_(position)
+        position_ids = self.rope_deltas + self.cache_position.to(self.rope_deltas.dtype)
+        self.position_ids.copy_(position_ids.unsqueeze(0).expand(3, -1, -1))
+        self.mask.copy_(self.mask_table[position])
+        if self.graph is None:
+            self._step()
+        else:
+            self.graph.replay()
+        return self.output
 
 
 class DecodeGraphs:
     """Groups the two graph boundaries so a full-frame graph can replace them."""
 
     def __init__(
-        self, talker: Any, device: torch.device, dtype: torch.dtype, max_cache_len: int
+        self,
+        talker: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+        max_cache_len: int,
+        talker_mode: TalkerMode,
     ) -> None:
         self.predictor = PredictorGraph(
             talker.code_predictor, talker.config.hidden_size, device, dtype
         )
-        self.talker = TalkerGraph(talker.model, device, dtype, max_cache_len)
+        self.talker = TalkerGraph(
+            talker.model, device, dtype, max_cache_len, talker_mode
+        )
 
     def capture(self) -> None:
         """Captures both reusable decode blocks once per loaded talker."""
@@ -227,9 +309,15 @@ class DecodeGraphs:
 
 
 @cache
-def decode_graphs(talker: torch.nn.Module, max_cache_len: int) -> DecodeGraphs:
+def decode_graphs(
+    talker: torch.nn.Module,
+    max_cache_len: int,
+    talker_mode: TalkerMode = "compile",
+) -> DecodeGraphs:
     """Creates persistent graph objects and allocations once per talker module."""
     parameter = next(talker.parameters())
-    graphs = DecodeGraphs(talker, parameter.device, parameter.dtype, max_cache_len)
+    graphs = DecodeGraphs(
+        talker, parameter.device, parameter.dtype, max_cache_len, talker_mode
+    )
     graphs.capture()
     return graphs
