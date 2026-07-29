@@ -151,7 +151,7 @@ class PredictorGraph:
 
 
 class TalkerGraph:
-    """Owns fixed talker KV storage and one-token CUDA graph buffers."""
+    """Owns fixed talker KV storage, masks, and one-token graph buffers."""
 
     def __init__(
         self,
@@ -165,8 +165,6 @@ class TalkerGraph:
         self.max_cache_len = max_cache_len
         config = model.config
         self.cache = StaticCache(config=config, max_cache_len=max_cache_len)
-        for layer in self.cache.layers:
-            layer.is_compileable = False
         self.cache.early_initialization(
             1, config.num_key_value_heads, config.head_dim, dtype, device
         )
@@ -175,12 +173,25 @@ class TalkerGraph:
         self.cache_position = torch.zeros(1, device=device, dtype=torch.long)
         self.position_ids = torch.zeros((3, 1, 1), device=device, dtype=torch.float32)
         self.rope_deltas = torch.zeros((1, 1), device=device, dtype=torch.float32)
+        dummy = torch.zeros_like(self.inputs)
+        mask_name = (
+            "sliding_attention"
+            if getattr(config, "sliding_window", None) is not None
+            else "full_attention"
+        )
+        self.mask_table = tuple(
+            _masks(model, dummy, torch.tensor([index], device=device), self.cache)[
+                mask_name
+            ]
+            for index in range(max_cache_len)
+        )
+        self.mask = self.mask_table[0].clone()
         self.graph: torch.cuda.CUDAGraph | None = None
 
     def _step(self) -> None:
         hidden = self.model(
             inputs_embeds=self.inputs,
-            attention_mask=None,
+            attention_mask=self.mask,
             position_ids=self.position_ids,
             past_key_values=self.cache,
             cache_position=self.cache_position,
@@ -229,6 +240,7 @@ class TalkerGraph:
         self.cache_position.fill_(position)
         position_ids = self.rope_deltas + self.cache_position.to(self.rope_deltas.dtype)
         self.position_ids.copy_(position_ids.unsqueeze(0).expand(3, -1, -1))
+        self.mask.copy_(self.mask_table[position])
         if self.graph is None:
             self._step()
         else:
