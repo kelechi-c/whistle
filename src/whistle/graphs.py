@@ -78,8 +78,11 @@ def predictor_loop(
     return output
 
 
+compiled_predictor_loop = torch.compile(predictor_loop, mode="reduce-overhead")
+
+
 class PredictorGraph:
-    """Owns the static predictor loop buffers and optional CUDA graph."""
+    """Owns buffers for one Inductor-managed predictor-loop graph."""
 
     def __init__(
         self,
@@ -114,10 +117,11 @@ class PredictorGraph:
             _masks(predictor.model, seed if index == 0 else token, position, self.cache)
             for index, position in enumerate(self.positions)
         )
-        self.graph: torch.cuda.CUDAGraph | None = None
+        self.loop = compiled_predictor_loop if device.type == "cuda" else predictor_loop
+        self.ready = False
 
     def _step(self) -> None:
-        predictor_loop(
+        self.loop(
             self.predictor,
             self.inputs,
             self.cache,
@@ -128,37 +132,26 @@ class PredictorGraph:
         )
 
     def capture(self) -> None:
-        """Captures the loop once; CPU keeps the same block eager for tests."""
-        if self.device.type != "cuda" or self.graph is not None:
+        """Warms the compiled loop and lets Inductor own its cudagraph tree."""
+        if self.device.type != "cuda" or self.ready:
             return
-        stream = torch.cuda.Stream(device=self.device)
-        stream.wait_stream(torch.cuda.current_stream(self.device))
-        with torch.cuda.stream(stream):
-            for _ in range(3):
-                self.cache.reset()
-                self._step()
-        stream.synchronize()
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.stream(stream):
+        for _ in range(3):
             self.cache.reset()
-            with torch.cuda.graph(self.graph):
-                self._step()
-        torch.cuda.current_stream(self.device).wait_stream(stream)
+            self._step()
+        torch.cuda.synchronize(self.device)
         self.cache.reset()
+        self.ready = True
 
     def run(self, inputs: torch.Tensor) -> torch.Tensor:
         """Copies one frame input and returns the reusable residual-code buffer."""
         self.inputs.copy_(inputs)
         self.cache.reset()
-        if self.graph is None:
-            self._step()
-        else:
-            self.graph.replay()
+        self._step()
         return self.output
 
 
 class TalkerGraph:
-    """Owns fixed talker KV storage, masks, and one-token graph buffers."""
+    """Owns fixed talker KV storage and one-token CUDA graph buffers."""
 
     def __init__(
         self,
@@ -172,6 +165,8 @@ class TalkerGraph:
         self.max_cache_len = max_cache_len
         config = model.config
         self.cache = StaticCache(config=config, max_cache_len=max_cache_len)
+        for layer in self.cache.layers:
+            layer.is_compileable = False
         self.cache.early_initialization(
             1, config.num_key_value_heads, config.head_dim, dtype, device
         )
@@ -180,25 +175,12 @@ class TalkerGraph:
         self.cache_position = torch.zeros(1, device=device, dtype=torch.long)
         self.position_ids = torch.zeros((3, 1, 1), device=device, dtype=torch.float32)
         self.rope_deltas = torch.zeros((1, 1), device=device, dtype=torch.float32)
-        dummy = torch.zeros_like(self.inputs)
-        mask_name = (
-            "sliding_attention"
-            if getattr(config, "sliding_window", None) is not None
-            else "full_attention"
-        )
-        self.mask_table = tuple(
-            _masks(model, dummy, torch.tensor([index], device=device), self.cache)[
-                mask_name
-            ]
-            for index in range(max_cache_len)
-        )
-        self.mask = self.mask_table[0].clone()
         self.graph: torch.cuda.CUDAGraph | None = None
 
     def _step(self) -> None:
         hidden = self.model(
             inputs_embeds=self.inputs,
-            attention_mask=self.mask,
+            attention_mask=None,
             position_ids=self.position_ids,
             past_key_values=self.cache,
             cache_position=self.cache_position,
@@ -247,7 +229,6 @@ class TalkerGraph:
         self.cache_position.fill_(position)
         position_ids = self.rope_deltas + self.cache_position.to(self.rope_deltas.dtype)
         self.position_ids.copy_(position_ids.unsqueeze(0).expand(3, -1, -1))
-        self.mask.copy_(self.mask_table[position])
         if self.graph is None:
             self._step()
         else:
