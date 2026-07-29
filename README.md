@@ -15,6 +15,7 @@ canonical [Alicia input](alicia.txt):
 | v2 | Reduced Python/CPU sync overhead | 67.974 s | 0.664 | 1.505× |
 | **v3** | **Static cache + torch-compiled predictor pass** | **57.477 s** | **0.562** | **1.780×** |
 | v4 | CUDA graphs for predictor loop + talker pass | 64.431 s | 0.630 | 1.588× |
+| **v5** | **Torch-compiled predictor loop + talker graph** | **48.106 s** | **0.470** | **2.127×** |
 
 Every version emits 1,279 complete codec frames, or 102.320 seconds of audio.
 Lower latency and RTF are better. Measurements use an RTX 3050 6 GB Laptop GPU
@@ -23,7 +24,9 @@ from v1. V3 reduces latency by another 15.44%, or 37.33% from the retained
 official baseline. V3's modular profile shows 40.46% lower predictor latency
 than v1, partly offset by 31.18% higher talker-step latency. V4 is deterministic
 but regresses 12.10% from v3 because it replays an uncompiled predictor loop
-and retains full-capacity static-cache talker attention.
+and retains full-capacity static-cache talker attention. V5 compiles the full
+predictor loop instead of explicitly graph-capturing it, reducing p50 latency
+by 25.33% from v4 and 47.55% from official.
 
 See [results.md](results.md) for the benchmark method, command, individual
 runs, and phase breakdown. See [report.md](report.md) for a concise optimization

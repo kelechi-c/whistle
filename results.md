@@ -435,3 +435,63 @@ SDPA work. The headline and modular reports are
 [`benchmarks/v4_faster_decode_0.6b_alicia.json`](benchmarks/v4_faster_decode_0.6b_alicia.json)
 and
 [`benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json).
+
+## `faster_decode` v5 — compiled predictor loop + talker CUDA graph
+
+V5 disables explicit CUDA graph capture for the predictor and compiles the
+complete fixed 15-token predictor loop with `torch.compile(mode="reduce-overhead")`.
+The one-token talker CUDA graph remains enabled. Predictor compilation and its
+Inductor graph-tree warmups occur before the excluded first full inference.
+
+```bash
+PYTHONPATH=src uv run --no-sync python profile_tts.py \
+  --text-file alicia.txt \
+  --backend split \
+  --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --speaker Ryan \
+  --lang English \
+  --max-new-tokens 1279 \
+  --warmup 1 \
+  --iterations 3 \
+  --json-out benchmarks/v5_faster_decode_0.6b_alicia.json
+```
+
+### Per-run results
+
+| Run | Generation latency | Audio | RTF | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 48.099 s | 102.320 s | 0.470 | 2.127× |
+| 2 | 48.113 s | 102.320 s | 0.470 | 2.127× |
+| 3 | 48.106 s | 102.320 s | 0.470 | 2.127× |
+| **p50** | **48.106 s** | **102.320 s** | **0.470** | **2.127×** |
+
+### Aggregate results
+
+| Metric | Result |
+|---|---:|
+| Cached model load | 10.685 s |
+| Mean generation latency | 48.106 s |
+| Generation latency range | 48.099–48.113 s |
+| Mean RTF | 0.470 |
+| Peak allocated GPU memory | 3,146.5 MiB |
+
+V5 is 25.33% lower latency than v4, 3.80% lower than the mixed-cache A/B
+candidate, and 47.55% lower than official inference (1.906× speedup).
+
+### Modular breakdown
+
+| Decode module | Calls | p50 latency | Share of decode | Average |
+|---|---:|---:|---:|---:|
+| Compiled predictor loop | 1,279 | 30.647 s | 66.32% | 23.962 ms/frame |
+| Talker graph | 1,278 | 15.452 s | 33.44% | 12.091 ms/step |
+| Other decode overhead | — | 112.40 ms | 0.24% | 0.088 ms/frame |
+| **Total decode** | — | **46.211 s** | **100%** | — |
+
+The compiled predictor loop is 15.43% faster than v4's eager predictor graph
+(30.647 versus 36.240 seconds). The measured talker graph also falls 40.98%
+(15.452 versus 26.180 seconds), though this version changes predictor execution
+as well, so that talker improvement should not be attributed to a single
+isolated talker change without another A/B. The reports are
+[`benchmarks/v5_faster_decode_0.6b_alicia.json`](benchmarks/v5_faster_decode_0.6b_alicia.json)
+and
+[`benchmarks/v5_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v5_faster_decode_0.6b_alicia_breakdown.json).

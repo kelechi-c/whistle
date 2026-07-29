@@ -18,6 +18,7 @@ RTX 3050 6 GB Laptop GPU.
 | V3 | Static caches and torch-compiled predictor | 57.477 s | 0.562 | 15.44% |
 | A/B candidate | V3 with dynamic talker cache | 50.011 s | 0.489 | 12.91% |
 | V4 | CUDA graphs for predictor loop and talker pass | 64.431 s | 0.630 | −28.83% vs candidate |
+| V5 | Compiled predictor loop and talker graph | 48.106 s | 0.470 | 25.33% vs V4 |
 
 V1 exposed the predictor and talker forwards instead of relying on nested
 Hugging Face generation. V2 kept buffers, cache positions, codec IDs, and
@@ -28,6 +29,11 @@ fixed static KV cache.
 V4 captured the complete eager predictor loop and one talker token as separate
 CUDA graphs. Its extremely stable 64.431-second result shows deterministic
 replay, but latency regressed.
+
+V5 disabled explicit predictor graph capture and compiled the complete
+predictor loop with `torch.compile(mode="reduce-overhead")`; the talker graph
+remained captured. It is the fastest measured configuration at 48.106 seconds
+p50, 1.906× faster than official.
 
 ## Findings
 
@@ -54,6 +60,11 @@ the compiled predictor kernels. The captured talker remains at 26.180 seconds:
 graph replay reduces launch overhead but does not reduce full-capacity static
 attention work.
 
+V5 restores the compiled predictor advantage: predictor-loop time falls from
+36.240 seconds in V4 to 30.647 seconds. Talker-graph time also falls from
+26.180 to 15.452 seconds in the measured configuration. Total decode reaches
+46.211 seconds: 66.32% predictor, 33.44% talker, and 0.24% remaining overhead.
+
 ## Conclusion
 
 Static cache is beneficial for the compiled predictor but currently harmful
@@ -63,4 +74,6 @@ static-cache predictor with a dynamic talker cache: 50.011 seconds p50,
 only when the talker forward is compiled or CUDA-graph captured so fixed
 addresses and shapes can offset its larger attention extent. V4 shows that
 capture alone is insufficient: the next experiment should capture a compiled
-full-frame predictor and avoid full-capacity talker attention.
+full-frame predictor and avoid full-capacity talker attention. V5 effectively
+validates the first half of that direction: preserve the compiler-managed
+predictor graph tree rather than replacing it with an eager CUDA graph.

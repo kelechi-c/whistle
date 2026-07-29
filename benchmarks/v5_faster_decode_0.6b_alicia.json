@@ -1,0 +1,67 @@
+{
+  "backend": "split",
+  "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "text_file": "alicia.txt",
+  "text_characters": 1264,
+  "token_count": 1279,
+  "expected_codec_frames": 1279,
+  "load_seconds": 10.684851993006305,
+  "iterations": [
+    {
+      "wall_seconds": 48.098560038997675,
+      "audio_seconds": 102.32,
+      "rtf": 0.4700797501856693,
+      "xrt": 2.1272986117887998,
+      "peak_memory_mb": 3141.15771484375,
+      "phases": {
+        "prepare": 0.0066979842185974124,
+        "prefill": 0.07623987579345703,
+        "decode": 46.19572265625,
+        "codec": 1.8191636962890625
+      }
+    },
+    {
+      "wall_seconds": 48.11266947900003,
+      "audio_seconds": 102.32,
+      "rtf": 0.47021764541634126,
+      "xrt": 2.1266747637991714,
+      "peak_memory_mb": 3146.47607421875,
+      "phases": {
+        "prepare": 0.0039618239402771,
+        "prefill": 0.07655628967285157,
+        "decode": 46.2107890625,
+        "codec": 1.820684326171875
+      }
+    },
+    {
+      "wall_seconds": 48.10554979999142,
+      "audio_seconds": 102.32,
+      "rtf": 0.4701480629397129,
+      "xrt": 2.126989514212313,
+      "peak_memory_mb": 3146.47607421875,
+      "phases": {
+        "prepare": 0.003909631967544556,
+        "prefill": 0.07635148620605468,
+        "decode": 46.2025390625,
+        "codec": 1.8220902099609375
+      }
+    }
+  ],
+  "mean_wall_seconds": 48.10559310599638,
+  "mean_rtf": 0.4701484861805745,
+  "p50_wall_seconds": 48.10554979999142,
+  "p50_rtf": 0.4701480629397129,
+  "phase_semantics": "non_overlapping",
+  "mean_phases": {
+    "codec": 1.8206460774739583,
+    "decode": 46.20301692708333,
+    "prefill": 0.07638255055745442,
+    "prepare": 0.004856480042139689
+  },
+  "p50_phases": {
+    "codec": 1.820684326171875,
+    "decode": 46.2025390625,
+    "prefill": 0.07635148620605468,
+    "prepare": 0.0039618239402771
+  }
+}
