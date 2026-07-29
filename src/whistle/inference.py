@@ -43,7 +43,7 @@ def tts_infer(
     speaker: str = "serena",
     language: str = "english",
     max_new_tokens: int = 1_280,
-    talker_mode: TalkerMode = "official-eager",
+    talker_mode: TalkerMode = "predictor-ffn-graphs",
     stop_at_eos: bool = True,
     repetition_penalty: float = 1.2,
 ) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
