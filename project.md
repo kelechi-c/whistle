@@ -99,3 +99,9 @@ complete 15-token residual predictor. Its incremental codec path uses 25-frame
 left context. The report also records its batch-one/CUDA-only constraints,
 fixed predictor sampling policy, remaining host synchronizations, reported
 benchmarks, and the optimization boundaries worth carrying into Whistle.
+
+The v4.1 dynamic/eager-talker diagnostic is noncompetitive: its headline p50
+was 91.148 s, while its separate modular median was 100.541 s. Dynamic KV
+growth changes buffer addresses and incurs per-step concatenation/reallocation;
+the modular measurements also increased across requests. V5 remains the
+preferred measured configuration.
