@@ -7,6 +7,7 @@ retaining the official model weights and codec decoder. Benchmarks use the full
 `alicia.txt` input, Ryan, English, bfloat16 SDPA, three measured runs, and a
 fixed 1,279-frame output (102.320 seconds of audio) on an RTX 3050 6 GB Laptop
 GPU. V5.1 and V6 use three excluded full warmups.
+V7 uses one excluded full warmup.
 
 ## Optimization progression
 
@@ -21,6 +22,7 @@ GPU. V5.1 and V6 use three excluded full warmups.
 | V5 | Compiled predictor loop and talker graph | 48.106 s | 0.470 | 25.33% vs V4 (invalid) |
 | V5.1 | Explicit-mask talker graph | 64.188 s | 0.627 | −33.43% vs V5 |
 | V6 | Compiled explicit-mask talker | 56.577 s | 0.553 | 11.86% vs V5.1 (invalid) |
+| V7 | Exact predictor and talker FFN eager CUDA graphs | 56.858 s | 0.556 | 38.01% vs official |
 
 V1 exposed the predictor and talker forwards instead of relying on nested
 Hugging Face generation. V2 kept buffers, cache positions, codec IDs, and
@@ -91,6 +93,15 @@ and the first thirteen codebooks of frame 1 match, so a small numerical change
 in the compiled talker hidden state crosses a later greedy predictor argmax
 boundary; autoregression then makes the sequence diverge. V6 is therefore a
 performance diagnostic, not a valid quality result.
+
+V7 keeps the official dynamic attention shapes and eager numerical kernels.
+It removes nested predictor scheduling, captures one eager CUDA graph for each
+fixed residual-codebook position, and graphs only the talker's shape-invariant
+post-attention norm, MLP, and residual blocks. On the historical 1,280-token
+fixed Alicia benchmark it reaches 56.858 seconds p50 and 0.556 RTF. An
+independent full validation generated the reference before installing the
+wrappers and matched all 20,480 codec IDs and 2,457,600 waveform samples
+exactly.
 
 ## Correctness failure and recovery
 
@@ -170,6 +181,6 @@ With repetition penalty 1.2, the repaired greedy path reached natural EOS after
 ## Conclusion
 
 V5 and V6 latency results remain invalid because those paths fail exact token
-parity. The official-eager greedy path is now the correctness reference.
-Optimized variants must match its complete codec-token and waveform output
-before their latency results are treated as valid.
+parity. V7 is the first optimized graph path promoted through the complete
+codec-token and waveform parity gate. Its 56.858-second fixed-budget p50 is
+38.01% below the retained official baseline without output degradation.

@@ -110,3 +110,14 @@ samples match the official greedy runtime exactly.
 
 The technical report treats numerical codec-token divergence and greedy
 low-energy collapse as separate failures with separate causes.
+
+`sandbox/latency_lab/` is an isolated optimization branch of the runtime. Its
+best experiment removes nested predictor scheduling with per-codebook eager
+CUDA graphs and graphs only the talker's fixed-shape residual FFN blocks. It
+retains full 1,280-frame codec and waveform parity while reducing the measured
+wall time from an 80.198-second eager reference to 56.936 seconds p50.
+
+The historical fixed-budget V7 benchmark uses Ryan and 1,279 complete frames
+for parity with 1,280 official selected tokens. Its three-run p50 is 56.858
+seconds at 0.556 RTF; the artifact is
+`benchmarks/v7_exact_graphs_0.6b_alicia.json`.

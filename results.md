@@ -14,6 +14,7 @@ their recorded warmup policy.
 | `faster_decode` v2 | Reduced Python/CPU sync overhead | 67.974 s | 0.664 | 1.505× | −4.78% vs v1 |
 | **`faster_decode` v3** | **Static cache + torch-compiled predictor pass** | **57.477 s** | **0.562** | **1.780×** | **−15.44% vs v2** |
 | `faster_decode` v6 *(invalid)* | Compiled explicit-mask static-cache talker | 56.577 s | 0.553 | 1.808× | −11.86% vs v5.1; fails codec parity |
+| **`latency_lab` v7 *(exact)*** | **Predictor + talker FFN eager CUDA graphs** | **56.858 s** | **0.556** | **1.800×** | **+0.50% vs invalid v6; −38.01% vs official** |
 
 The official baseline is retained for future version comparisons rather than
 rerun after every fast-path change.
@@ -598,6 +599,77 @@ hidden state; autoregression then amplifies it. The modular artifact is
 The profiler now writes its benchmark JSON before running the optional,
 untimed parity assertion, so future failing parity runs retain their timing
 artifact.
+
+## `latency_lab` v7 — exact predictor and talker FFN CUDA graphs
+
+V7 returns to the official dynamic attention shapes and original eager kernels.
+It removes the predictor's nested `GenerationMixin` scheduling, captures one
+CUDA graph for each of the 15 fixed residual-codebook positions, and captures
+only the shape-invariant post-attention norm, MLP, and residual block in each
+talker layer. Variable-length talker attention remains eager.
+
+The fixed-budget benchmark uses the historical 1,280-selected-token contract:
+1,279 complete codec frames, 102.320 seconds of audio, Ryan, and the complete
+Alicia input. One full warmup is excluded, followed by three measured runs.
+
+```bash
+PYTHONPATH=sandbox/latency_lab:src uv run python \
+  sandbox/latency_lab/profile_lab.py \
+  --text-file alicia.txt \
+  --backend split \
+  --talker-mode predictor-ffn-graphs \
+  --speaker Ryan \
+  --lang English \
+  --max-new-tokens 1279 \
+  --fixed-tokens \
+  --repetition-penalty 1.2 \
+  --warmup 1 \
+  --iterations 3 \
+  --json-out benchmarks/v7_exact_graphs_0.6b_alicia.json
+```
+
+### Per-run results
+
+| Run | Generation latency | Audio | RTF | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 56.829 s | 102.320 s | 0.555 | 1.800× |
+| 2 | 56.858 s | 102.320 s | 0.556 | 1.800× |
+| 3 | 56.881 s | 102.320 s | 0.556 | 1.799× |
+| **p50** | **56.858 s** | **102.320 s** | **0.556** | **1.800×** |
+
+### Aggregate results
+
+| Metric | Result |
+|---|---:|
+| Cached model load | 15.591 s |
+| Mean generation latency | 56.856 s |
+| Generation latency range | 56.829–56.881 s |
+| Mean RTF | 0.556 |
+| Peak allocated GPU memory | 3,041.8 MiB |
+
+### Phase breakdown
+
+| Generation phase | Mean latency | Share of wall time |
+|---|---:|---:|
+| Decode | 54.981 s | 96.70% |
+| Codec | 1.821 s | 3.20% |
+| Prefill | 50.85 ms | 0.09% |
+| Preparation | 2.10 ms | <0.01% |
+
+The separate 128-frame modular diagnostic attributes 65.94% of decode to the
+residual predictor, 32.75% to the talker, and 1.30% to scheduling and token
+work. Unlike V5 and V6, V7 passed independent full-sequence validation: a
+reference was generated before installing any graph wrappers, and the candidate
+matched all 20,480 codec IDs and 2,457,600 waveform samples exactly.
+
+V7 is 38.01% lower latency than the retained official baseline. It is 0.50%
+slower than V6, but V6 fails codec parity and is not a valid quality result.
+The machine-readable fixed-budget report is
+[`benchmarks/v7_exact_graphs_0.6b_alicia.json`](benchmarks/v7_exact_graphs_0.6b_alicia.json).
+The independent full validation and modular reports are in
+[`sandbox/latency_lab/full_validation.json`](sandbox/latency_lab/full_validation.json)
+and
+[`sandbox/latency_lab/predictor_ffn_graphs_modular_128.json`](sandbox/latency_lab/predictor_ffn_graphs_modular_128.json).
 
 ## Greedy correctness recovery
 

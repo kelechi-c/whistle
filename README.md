@@ -17,6 +17,8 @@ canonical [Alicia input](alicia.txt):
 | v4 | CUDA graphs for predictor loop + talker pass | 64.431 s | 0.630 | 1.588× |
 | **v5** | **Torch-compiled predictor loop + talker graph** | **48.106 s** | **0.470** | **2.127×** |
 | v5.1 | Explicit-mask talker graph | 64.188 s | 0.627 | 1.594× |
+| v6 *(invalid)* | Compiled explicit-mask talker | 56.577 s | 0.553 | 1.808× |
+| **v7 *(exact)*** | **Predictor + talker FFN eager CUDA graphs** | **56.858 s** | **0.556** | **1.800×** |
 
 Every version emits 1,279 complete codec frames, or 102.320 seconds of audio.
 Lower latency and RTF are better. Measurements use an RTX 3050 6 GB Laptop GPU
@@ -30,13 +32,15 @@ predictor loop instead of explicitly graph-capturing it, reducing p50 latency
 by 25.33% from v4 and 47.55% from official.
 V5.1 restores an explicit talker mask and regresses 33.43% from v5; the
 fully warmed modular profile shows the talker graph rising 84.18%.
+V7 replaces numerically divergent compilation with exact eager-kernel CUDA
+graphs: one graph per residual-predictor codebook position and one graph for
+each talker layer's fixed-shape residual FFN. It is 38.01% faster than official
+and only 0.50% slower than the invalid V6 result.
 
 Correctness status: V5 and V6 are performance diagnostics with invalid codec
-output. The default runtime now uses the `official-eager` greedy reference,
-DynamicCache, official codec decoding, EOS termination, and repetition penalty
-1.2. Its full Alicia validation exactly matches 19,456 official codec IDs and
-2,334,720 waveform samples; optimized modes must meet that parity gate before
-promotion.
+output. V7 passed an independent full-sequence validation against a reference
+generated before its graph wrappers were installed: all 20,480 codec IDs and
+2,457,600 waveform samples matched exactly.
 
 See [results.md](results.md) for the benchmark method, command, individual
 runs, and phase breakdown. See [report.md](report.md) for a concise optimization
