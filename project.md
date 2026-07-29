@@ -2,48 +2,42 @@
 
 ## src/whistle/inference.py - official-module latency path
 
-`tts_infer` is the single greedy inference hot path for the upcoming optimized
-runtime. It accepts an already-loaded official `Qwen3TTSModel`, so checkpoint
-loading is outside latency measurements. This path is fixed-length, batch-one,
-non-streaming CustomVoice inference with a compiled predictor loop and an
-explicitly masked static-cache talker. It deliberately has no engine, scheduler,
-combined full-frame graph, or stochastic sampling.
+`tts_infer` is the batch-one greedy CustomVoice path. It accepts an already
+loaded official `Qwen3TTSModel`, so checkpoint loading is outside inference
+measurements. Its default `official-eager` mode is the correctness reference;
+the compiled/static modes remain selectable experiments.
 
 ```
 official processor + prompt embeddings
-  -> prefill: talker.forward(full prompt, StaticCache)
+  -> prefill: talker.forward(full prompt, DynamicCache)
   -> first codebook-zero token
   -> decode frame loop:
-       code predictor forward x 15 residual codebooks
-       -> sum all 16 codebook embeddings
-       -> compiled talker.model forward(one token, fixed StaticCache)
+       talker.forward(one token)
+         -> official greedy code predictor x 15 residual codebooks
+         -> official embedding reduction and dynamic-cache talker forward
+       -> float32 logits processors + argmax
+       -> stop before codec EOS
   -> official speech_tokenizer.decode(all frames)
   -> waveform + codec IDs
 ```
 
-Every talker and predictor head selects `argmax`; the only logit constraints
-restrict talker selection to valid codec IDs. Fixed generation avoids the
-per-frame EOS `.item()` synchronization entirely. The preparation block
-reproduces the official CustomVoice role, language,
-speaker, TTS special-token, text, codec-pad, and codec-BOS alignment. Prefill
-uses the outer official talker once because it computes mRoPE state, the first
-logits, `past_hidden`, and the initial KV cache. Decode calls the predictor
-directly so its per-frame cache and each residual head are visible. It then
-calls the inner talker backbone directly, because the outer talker would invoke
-the predictor internally a second time.
+Every head is greedy. Primary logits are converted to float32 before applying
+the official repetition and suppression processors, then selected with
+`argmax`. EOS token 2150 remains reachable even though ordinary codec tokens
+end at 2047. The default repetition penalty is 1.2: lower greedy penalties
+collapsed into near-silence after roughly 16 seconds on Alicia, while 1.2
+retained energy and matched the official greedy runtime exactly. The output
+allocation is trimmed to the natural EOS length.
 
-Codes, predictor inputs, positions, masks, and KV storage are preallocated GPU
-tensors. The talker owns a 2,048-position `StaticCache`; the predictor owns a
-16-position cache reset and reused for each frame. The talker prebuilds its
-causal mask per cache position and copies the selected mask into one stable
-input buffer before each frame.
-
-The predictor enters its official inner transformer and fixed residual heads
-directly. Its separate embedding-table weights are stacked once per module;
-one indexed gather and reduction then replaces 15 Python-dispatched embedding
-calls when assembling each talker frame.
+The prompt block reproduces official role, language, speaker, TTS special
+tokens, text, codec padding, and codec BOS. Default decode deliberately uses
+the outer official talker forward so predictor cache behavior, bf16 embedding
+reduction order, attention state, and hidden-state updates are identical.
 
 ## src/whistle/graphs.py - decode capture boundaries
+
+`OfficialPredictor` and `OfficialTalker` own the default DynamicCache
+correctness state. `DecodeGraphs` selects these for `official-eager`.
 
 `predictor_loop` contains the complete greedy residual-code sequence. One
 `torch.compile(mode="reduce-overhead")` callable covers the entire loop, so
@@ -59,15 +53,13 @@ inputs, compileable `StaticCache`, and explicit per-position mask; the invalid
 mask-free static-cache path remains excluded.
 
 `decode_graphs` caches both objects per loaded talker. The predictor embedding
-weights are stacked once per predictor module. Variable-length prefill stays
-eager and writes directly into the talker's reset dynamic cache. CPU tests
-execute the same blocks eagerly. `DecodeGraphs` is the scheduler boundary that
-a later compiled single full-frame graph can replace.
+weights are stacked once for experimental static modes. Variable-length
+prefill stays eager. `DecodeGraphs` is the boundary that later optimized blocks
+can replace only after they pass exact parity.
 
-The codec writes chunks directly into one fixed GPU waveform instead of
-building a Python list or using the official wrapper's `.cpu().numpy()`
-conversion. CUDA events separate preparation, prefill/TTFA, decode, and codec
-time with one synchronization only after the completed waveform is enqueued.
+The codec calls the official tokenizer model's `decode` implementation and
+does not duplicate its chunking. CUDA events separate preparation, prefill,
+decode, and codec time with one synchronization after the waveform is enqueued.
 `tts_infer` returns both the waveform and the `[frames, codebooks]` codec-ID
 tensor on-device. The CLI performs the terminal waveform CPU transfer solely
 for WAV writing.
@@ -85,10 +77,10 @@ library. `src/whistle/infer.py` owns model loading, WAV output, and the CLI;
 compares fixed-length CustomVoice split and official runs.
 
 `profile_tts.py --backend split --check-codec-parity` performs one untimed
-official greedy generation after the measurements. It retains the official
-API's `[frames, codebooks]` token tensor and requires exact shape and ID
-equality, reporting the first divergent frame/codebook. `--talker-mode`
-selects `compile` (default) or `cuda-graph`.
+official greedy generation after the measurements. It accounts for the
+official selected-token/complete-frame offset and requires exact codec shape,
+ID, waveform shape, and sample equality. `--talker-mode` defaults to
+`official-eager`; `compile` and `cuda-graph` are experimental.
 
 ## inference optimization references
 
@@ -111,3 +103,10 @@ The V6 compiled static-cache talker reached 56.577 s p50 but is invalid:
 official codec IDs first diverge at frame 1/codebook 13. Frame 0 and the first
 13 codebooks of frame 1 match, implicating a small compiled talker hidden-state
 difference that later flips a greedy predictor argmax and then compounds.
+
+The repaired greedy reference uses repetition penalty 1.2 and naturally emits
+1,216 Alicia frames (97.28 s). All 19,456 codec IDs and 2,334,720 waveform
+samples match the official greedy runtime exactly.
+
+The technical report treats numerical codec-token divergence and greedy
+low-energy collapse as separate failures with separate causes.

@@ -75,6 +75,7 @@ def _load_split(
     speaker: str,
     max_new_tokens: int,
     talker_mode: TalkerMode,
+    repetition_penalty: float,
 ) -> tuple[Generate, torch.device, float, Any]:
     """Loads the official model for the explicit greedy prefill/decode path."""
     model, device, load_seconds = _load_model(checkpoint or DEFAULT_MODEL)
@@ -87,6 +88,7 @@ def _load_split(
             speaker=speaker,
             max_new_tokens=max_new_tokens,
             talker_mode=talker_mode,
+            repetition_penalty=repetition_penalty,
         )
         phases = {name: timings[name] for name in ("prepare", "prefill", "decode", "codec")}
         return Sample(waveform[0], sample_rate, phases, codec_ids)
@@ -100,6 +102,7 @@ def _official_sample(
     language: str,
     speaker: str,
     max_new_tokens: int,
+    repetition_penalty: float,
 ) -> Sample:
     """Runs the official API path while retaining its generated codec IDs."""
     input_ids = wrapper._tokenize_texts([wrapper._build_assistant_text(text)])
@@ -107,7 +110,7 @@ def _official_sample(
         min_new_tokens=max_new_tokens,
         max_new_tokens=max_new_tokens,
         do_sample=False,
-        repetition_penalty=1.0,
+        repetition_penalty=repetition_penalty,
         subtalker_dosample=False,
     )
     codes, _ = wrapper.model.generate(
@@ -130,13 +133,19 @@ def _load_official(
     language: str,
     speaker: str,
     max_new_tokens: int,
+    repetition_penalty: float,
 ) -> tuple[Generate, torch.device, float, Any]:
     """Loads fixed-length official CustomVoice inference for comparison."""
     wrapper, device, load_seconds = _load_model(model_name)
 
     def generate() -> Sample:
         return _official_sample(
-            wrapper, text, language, speaker, max_new_tokens
+            wrapper,
+            text,
+            language,
+            speaker,
+            max_new_tokens,
+            repetition_penalty,
         )
 
     return generate, device, load_seconds, wrapper
@@ -175,6 +184,23 @@ def _check_codec_parity(split: torch.Tensor, official: torch.Tensor) -> None:
             f"split={split.shape[0]} frames, official={official.shape[0]} frames"
         )
     print(f"codec id parity: exact match ({split.shape[0]} frames)")
+
+
+def _check_audio_parity(split: Audio, official: Audio) -> None:
+    """Reports exact waveform equality after codec-token parity succeeds."""
+    split_audio = _to_numpy(split)
+    official_audio = _to_numpy(official)
+    if split_audio.shape != official_audio.shape:
+        raise click.ClickException(
+            f"audio shape mismatch: split={split_audio.shape}, "
+            f"official={official_audio.shape}"
+        )
+    maximum_error = float(np.max(np.abs(split_audio - official_audio), initial=0.0))
+    if maximum_error != 0.0:
+        raise click.ClickException(
+            f"audio mismatch: max absolute error={maximum_error:.8g}"
+        )
+    print(f"audio parity: exact match ({split_audio.size} samples)")
 
 
 def _benchmark(
@@ -251,8 +277,8 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 )
 @click.option(
     "--talker-mode",
-    type=click.Choice(["compile", "cuda-graph"]),
-    default="compile",
+    type=click.Choice(["official-eager", "compile", "cuda-graph"]),
+    default="official-eager",
     show_default=True,
 )
 @click.option("--check-codec-parity", is_flag=True)
@@ -260,6 +286,7 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option("--lang", default="english")
 @click.option("--speaker", default="serena", show_default=True)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=1_280)
+@click.option("--repetition-penalty", type=click.FloatRange(min=0.001), default=1.2)
 @click.option("--iterations", type=click.IntRange(min=1), default=3)
 @click.option("--warmup", type=click.IntRange(min=0), default=1)
 @click.option("--out", type=click.Path(path_type=pl.Path), default=None)
@@ -275,6 +302,7 @@ def main(
     lang: str,
     speaker: str,
     max_new_tokens: int,
+    repetition_penalty: float,
     iterations: int,
     warmup: int,
     out: pl.Path | None,
@@ -287,10 +315,23 @@ def main(
     torch.manual_seed(RUNTIME.seed)
     if backend == "split":
         loaded = _load_split(
-            model, text, lang, speaker, max_new_tokens, talker_mode
+            model,
+            text,
+            lang,
+            speaker,
+            max_new_tokens,
+            talker_mode,
+            repetition_penalty,
         )
     else:
-        loaded = _load_official(model or DEFAULT_MODEL, text, lang, speaker, max_new_tokens)
+        loaded = _load_official(
+            model or DEFAULT_MODEL,
+            text,
+            lang,
+            speaker,
+            max_new_tokens,
+            repetition_penalty,
+        )
     generate, device, load_seconds, wrapper = loaded
     print(f"backend: {backend}; device: {device}; load: {load_seconds:.3f}s")
     rows, sample = _benchmark(generate, device, iterations, warmup)
@@ -336,11 +377,16 @@ def main(
             "backend": backend,
             "talker_mode": talker_mode if backend == "split" else None,
             "codec_parity_checked": check_codec_parity,
+            "repetition_penalty": repetition_penalty,
             "model": model,
             "text_file": str(text_file) if text_file is not None else None,
             "text_characters": len(text),
             "token_count": max_new_tokens,
-            "expected_codec_frames": max_new_tokens if backend == "split" else max_new_tokens - 1,
+            "expected_codec_frames": (
+                sample.codec_ids.shape[0]
+                if sample.codec_ids is not None
+                else max_new_tokens - 1
+            ),
             "load_seconds": load_seconds,
             "iterations": [asdict(row) for row in rows],
             "mean_wall_seconds": mean_wall,
@@ -361,11 +407,17 @@ def main(
             )
         print("running untimed official codec id parity check")
         official = _official_sample(
-            wrapper, text, lang, speaker, max_new_tokens
+            wrapper,
+            text,
+            lang,
+            speaker,
+            max_new_tokens + 1,
+            repetition_penalty,
         )
         if official.codec_ids is None:
             raise RuntimeError("official generation did not return codec ids")
         _check_codec_parity(sample.codec_ids, official.codec_ids)
+        _check_audio_parity(sample.audio, official.audio)
     if trace_out is not None:
         _trace(generate, device, trace_out)
 
