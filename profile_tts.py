@@ -76,6 +76,7 @@ def _load_split(
     max_new_tokens: int,
     talker_mode: TalkerMode,
     repetition_penalty: float,
+    fixed_tokens: bool,
 ) -> tuple[Generate, torch.device, float, Any]:
     """Loads the official model for the explicit greedy prefill/decode path."""
     model, device, load_seconds = _load_model(checkpoint or DEFAULT_MODEL)
@@ -89,6 +90,7 @@ def _load_split(
             max_new_tokens=max_new_tokens,
             talker_mode=talker_mode,
             repetition_penalty=repetition_penalty,
+            stop_at_eos=not fixed_tokens,
         )
         phases = {name: timings[name] for name in ("prepare", "prefill", "decode", "codec")}
         return Sample(waveform[0], sample_rate, phases, codec_ids)
@@ -277,8 +279,10 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 )
 @click.option(
     "--talker-mode",
-    type=click.Choice(["official-eager", "compile", "cuda-graph"]),
-    default="official-eager",
+    type=click.Choice(
+        ["official-eager", "predictor-ffn-graphs", "compile", "cuda-graph"]
+    ),
+    default="predictor-ffn-graphs",
     show_default=True,
 )
 @click.option("--check-codec-parity", is_flag=True)
@@ -287,6 +291,11 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option("--speaker", default="serena", show_default=True)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=1_280)
 @click.option("--repetition-penalty", type=click.FloatRange(min=0.001), default=1.2)
+@click.option(
+    "--fixed-tokens",
+    is_flag=True,
+    help="ignore eos and emit the complete frame budget",
+)
 @click.option("--iterations", type=click.IntRange(min=1), default=3)
 @click.option("--warmup", type=click.IntRange(min=0), default=1)
 @click.option("--out", type=click.Path(path_type=pl.Path), default=None)
@@ -303,6 +312,7 @@ def main(
     speaker: str,
     max_new_tokens: int,
     repetition_penalty: float,
+    fixed_tokens: bool,
     iterations: int,
     warmup: int,
     out: pl.Path | None,
@@ -322,6 +332,7 @@ def main(
             max_new_tokens,
             talker_mode,
             repetition_penalty,
+            fixed_tokens,
         )
     else:
         loaded = _load_official(
@@ -378,6 +389,7 @@ def main(
             "talker_mode": talker_mode if backend == "split" else None,
             "codec_parity_checked": check_codec_parity,
             "repetition_penalty": repetition_penalty,
+            "fixed_tokens": fixed_tokens,
             "model": model,
             "text_file": str(text_file) if text_file is not None else None,
             "text_characters": len(text),
@@ -406,14 +418,15 @@ def main(
                 "codec parity checking requires the split backend"
             )
         print("running untimed official codec id parity check")
-        official = _official_sample(
-            wrapper,
-            text,
-            lang,
-            speaker,
-            max_new_tokens + 1,
-            repetition_penalty,
-        )
+        with torch.inference_mode():
+            official = _official_sample(
+                wrapper,
+                text,
+                lang,
+                speaker,
+                max_new_tokens + 1,
+                repetition_penalty,
+            )
         if official.codec_ids is None:
             raise RuntimeError("official generation did not return codec ids")
         _check_codec_parity(sample.codec_ids, official.codec_ids)

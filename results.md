@@ -613,8 +613,7 @@ The fixed-budget benchmark uses the historical 1,280-selected-token contract:
 Alicia input. One full warmup is excluded, followed by three measured runs.
 
 ```bash
-PYTHONPATH=sandbox/latency_lab:src uv run python \
-  sandbox/latency_lab/profile_lab.py \
+uv run python profile_tts.py \
   --text-file alicia.txt \
   --backend split \
   --talker-mode predictor-ffn-graphs \

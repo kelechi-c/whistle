@@ -121,3 +121,9 @@ The historical fixed-budget V7 benchmark uses Ryan and 1,279 complete frames
 for parity with 1,280 official selected tokens. Its three-run p50 is 56.858
 seconds at 0.556 RTF; the artifact is
 `benchmarks/v7_exact_graphs_0.6b_alicia.json`.
+
+V7 is promoted to `src/whistle/graphs.py` and is the default `tts_infer` mode.
+`PredictorGraphs` owns the prefix-visible predictor cache and its 15
+per-codebook graphs; `DecoderFfnGraph` wraps each talker layer while leaving
+prefill and variable-length attention eager. `official-eager` remains the
+explicit reference mode.
