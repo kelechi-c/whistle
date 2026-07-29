@@ -4,14 +4,14 @@ from functools import cache
 from typing import Any, Literal, TypeAlias
 
 import torch
-from transformers import StaticCache
+from transformers import DynamicCache, StaticCache
 from transformers.masking_utils import (
     create_causal_mask,
     create_sliding_window_causal_mask,
 )
 
 Masks: TypeAlias = dict[str, torch.Tensor]
-TalkerMode: TypeAlias = Literal["compile", "cuda-graph"]
+TalkerMode: TypeAlias = Literal["official-eager", "compile", "cuda-graph"]
 
 
 def _masks(
@@ -106,6 +106,81 @@ compiled_talker_step = torch.compile(talker_step, mode="reduce-overhead")
 graphable_talker_step = torch.compile(
     talker_step, mode="max-autotune-no-cudagraphs"
 )
+
+
+class OfficialPredictor:
+    """Runs the residual codebooks through the official dynamic-cache generator."""
+
+    def __init__(self, predictor: Any) -> None:
+        self.predictor = predictor
+        self.groups = predictor.config.num_code_groups - 1
+
+    def capture(self) -> None:
+        """Leaves the correctness reference eager and allocation-compatible."""
+
+    def run(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Returns the official greedy residual sequence for one talker token."""
+        return self.predictor.generate(
+            inputs_embeds=inputs,
+            max_new_tokens=self.groups,
+            do_sample=False,
+            output_hidden_states=True,
+            return_dict_in_generate=True,
+        ).sequences
+
+
+class OfficialTalker:
+    """Runs one inner-talker token with the official growing dynamic cache."""
+
+    mode: TalkerMode = "official-eager"
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        device: torch.device,
+        max_cache_len: int,
+    ) -> None:
+        self.model = model
+        self.device = device
+        self.max_cache_len = max_cache_len
+        self.cache = DynamicCache(config=model.config)
+        self.rope_deltas = torch.zeros((1, 1), device=device, dtype=torch.float32)
+
+    def capture(self) -> None:
+        """Leaves the correctness reference eager because its cache grows."""
+
+    def reset(self, prompt_length: int, rope_deltas: torch.Tensor | None = None) -> None:
+        """Creates fresh request state and validates its maximum frame budget."""
+        if prompt_length >= self.max_cache_len:
+            raise ValueError("prompt exceeds the talker cache capacity")
+        self.cache = DynamicCache(config=self.model.config)
+        self.rope_deltas.zero_()
+        if rope_deltas is not None:
+            self.rope_deltas.copy_(rope_deltas)
+
+    def set_rope_deltas(self, rope_deltas: torch.Tensor) -> None:
+        """Copies the prefill mRoPE delta used by later one-token forwards."""
+        self.rope_deltas.copy_(rope_deltas)
+
+    def run(self, inputs: torch.Tensor, position: int) -> torch.Tensor:
+        """Runs the official mask-free one-token dynamic-cache forward."""
+        if position >= self.max_cache_len:
+            raise ValueError("decode exceeds the talker cache capacity")
+        cache_position = torch.tensor([position], device=self.device, dtype=torch.long)
+        position_ids = self.rope_deltas + cache_position.to(self.rope_deltas.dtype)
+        position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        attention_mask = torch.ones(
+            (1, position + 1), device=self.device, dtype=torch.long
+        )
+        return self.model(
+            inputs_embeds=inputs,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=self.cache,
+            cache_position=cache_position,
+            use_cache=True,
+            return_dict=True,
+        ).last_hidden_state
 
 
 class PredictorGraph:
@@ -295,12 +370,16 @@ class DecodeGraphs:
         max_cache_len: int,
         talker_mode: TalkerMode,
     ) -> None:
-        self.predictor = PredictorGraph(
-            talker.code_predictor, talker.config.hidden_size, device, dtype
-        )
-        self.talker = TalkerGraph(
-            talker.model, device, dtype, max_cache_len, talker_mode
-        )
+        if talker_mode == "official-eager":
+            self.predictor = OfficialPredictor(talker.code_predictor)
+            self.talker = OfficialTalker(talker.model, device, max_cache_len)
+        else:
+            self.predictor = PredictorGraph(
+                talker.code_predictor, talker.config.hidden_size, device, dtype
+            )
+            self.talker = TalkerGraph(
+                talker.model, device, dtype, max_cache_len, talker_mode
+            )
 
     def capture(self) -> None:
         """Captures both reusable decode blocks once per loaded talker."""
@@ -312,7 +391,7 @@ class DecodeGraphs:
 def decode_graphs(
     talker: torch.nn.Module,
     max_cache_len: int,
-    talker_mode: TalkerMode = "compile",
+    talker_mode: TalkerMode = "official-eager",
 ) -> DecodeGraphs:
     """Creates persistent graph objects and allocations once per talker module."""
     parameter = next(talker.parameters())

@@ -9,10 +9,30 @@ import time
 
 from qwen_tts import Qwen3TTSModel
 import torch
+from transformers.generation.logits_process import (
+    LogitsProcessorList,
+    RepetitionPenaltyLogitsProcessor,
+    SuppressTokensLogitsProcessor,
+)
 
 from whistle.graphs import TalkerMode, decode_graphs
 
 MAX_CACHE_LEN = 2_048
+
+
+def _select_token(
+    logits: torch.Tensor,
+    history: torch.Tensor,
+    *,
+    eos_token_id: int,
+    processors: LogitsProcessorList,
+    allow_eos: bool,
+) -> torch.Tensor:
+    """Applies official processors and returns one greedy token."""
+    scores = processors(history, logits[:, -1].to(dtype=torch.float32, copy=True))
+    if not allow_eos or history.shape[1] < 2:
+        scores[:, eos_token_id] = -torch.inf
+    return scores.argmax(dim=-1)
 
 
 @torch.inference_mode()
@@ -23,17 +43,21 @@ def tts_infer(
     speaker: str = "serena",
     language: str = "english",
     max_new_tokens: int = 1_280,
-    talker_mode: TalkerMode = "compile",
+    talker_mode: TalkerMode = "official-eager",
+    stop_at_eos: bool = True,
+    repetition_penalty: float = 1.2,
 ) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
     """Runs batch-one CustomVoice inference through explicit forward passes.
 
     Prefill builds the complete non-streaming text/speaker prompt and fills the
-    persistent talker cache. Decode always emits ``max_new_tokens`` frames:
-    every token, codec-ID tensor, and waveform stays on-device until the caller
-    explicitly transfers the completed outputs.
+    persistent talker cache. Decode emits at most ``max_new_tokens`` frames and
+    normally stops before codec EOS. Tokens and waveform remain on-device until
+    the caller explicitly transfers the completed outputs.
     """
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be positive")
+    if repetition_penalty <= 0:
+        raise ValueError("repetition_penalty must be positive")
 
     started = time.perf_counter()
     model = tts.model
@@ -131,7 +155,7 @@ def tts_infer(
         prepare_seconds = now - cpu_phase_started
         cpu_phase_started = now
 
-    # === prefill: variable prompt into the persistent static talker cache ===
+    # === prefill: variable prompt into the selected talker cache ===
     talker_output = talker(
         inputs_embeds=talker_input,
         attention_mask=attention_mask,
@@ -143,8 +167,27 @@ def tts_infer(
         use_cache=True,
         return_dict=True,
     )
-    code_vocab_size = predictor.config.vocab_size
-    token = talker_output.logits[:, -1, :code_vocab_size].argmax(dim=-1)
+    eos_token_id = talker_config.codec_eos_token_id
+    suppress_from = talker_config.vocab_size - 1_024
+    suppress_tokens = [
+        token_id
+        for token_id in range(suppress_from, talker_config.vocab_size)
+        if token_id != eos_token_id
+    ]
+    processors = LogitsProcessorList()
+    if repetition_penalty != 1.0:
+        processors.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
+    processors.append(SuppressTokensLogitsProcessor(suppress_tokens, device=device))
+    primary_history = torch.empty(
+        (1, max_new_tokens), device=device, dtype=torch.long
+    )
+    token = _select_token(
+        talker_output.logits,
+        primary_history[:, :0],
+        eos_token_id=eos_token_id,
+        processors=processors,
+        allow_eos=stop_at_eos,
+    )
     past_hidden = talker_output.past_hidden
     graphs.talker.set_rope_deltas(talker.rope_deltas)
     if phase_events is not None:
@@ -155,36 +198,85 @@ def tts_infer(
         prefill_seconds = now - cpu_phase_started
         cpu_phase_started = now
 
-    # === decode: fixed GPU buffers, predictor residuals, cached talker forwards ===
+    # === decode: official token processing with bounded on-device outputs ===
     num_code_groups = talker_config.num_code_groups
-    num_residuals = num_code_groups - 1
     codes = torch.empty((max_new_tokens, num_code_groups), device=device, dtype=torch.long)
     predictor_input = torch.empty(
         (1, 2, talker_config.hidden_size),
         device=device,
         dtype=past_hidden.dtype,
     )
-    predictor_embedding_weights = graphs.predictor.weights
-    residual_indices = torch.arange(num_residuals, device=device)
+    residual_embeddings = tuple(predictor.get_input_embeddings())
+    frame_count = 0
 
     for frame_index in range(max_new_tokens):
+        if stop_at_eos and token.eq(eos_token_id).item():
+            break
+        if talker_mode == "official-eager":
+            cache_position = torch.tensor(
+                [prefill_length + frame_index], device=device, dtype=torch.long
+            )
+            step_attention_mask = torch.ones(
+                (1, prefill_length + frame_index + 1),
+                device=device,
+                dtype=torch.long,
+            )
+            talker_output = talker(
+                input_ids=token.view(1, 1),
+                attention_mask=step_attention_mask,
+                past_key_values=graphs.talker.cache,
+                past_hidden=past_hidden,
+                trailing_text_hidden=tts_pad,
+                tts_pad_embed=tts_pad,
+                generation_step=frame_index,
+                subtalker_dosample=False,
+                cache_position=cache_position,
+                output_hidden_states=True,
+                use_cache=True,
+                return_dict=True,
+            )
+            frame_codes = talker_output.hidden_states[-1]
+            codes[frame_index].copy_(frame_codes[0])
+            primary_history[:, frame_index].copy_(token)
+            frame_count = frame_index + 1
+            past_hidden = talker_output.past_hidden
+            token = _select_token(
+                talker_output.logits,
+                primary_history[:, :frame_count],
+                eos_token_id=eos_token_id,
+                processors=processors,
+                allow_eos=stop_at_eos,
+            )
+            continue
+
         last_id_hidden = codec_embeddings(token.view(1, 1))
         predictor_input[:, :1].copy_(past_hidden)
         predictor_input[:, 1:].copy_(last_id_hidden)
         residual_codes = graphs.predictor.run(predictor_input)
         codes[frame_index, 0].copy_(token[0])
         codes[frame_index, 1:].copy_(residual_codes[0])
+        primary_history[:, frame_index].copy_(token)
+        frame_count = frame_index + 1
         if frame_index + 1 == max_new_tokens:
             break
 
-        residual_hidden = predictor_embedding_weights[
-            residual_indices, residual_codes[0]
-        ].sum(dim=0).view(1, 1, -1)
-        talker_input = last_id_hidden + residual_hidden + tts_pad
+        codec_hiddens = torch.cat(
+            [last_id_hidden]
+            + [
+                embedding(residual_codes[:, index : index + 1])
+                for index, embedding in enumerate(residual_embeddings)
+            ],
+            dim=1,
+        )
+        talker_input = codec_hiddens.sum(dim=1, keepdim=True) + tts_pad
         past_hidden = graphs.talker.run(talker_input, prefill_length + frame_index)
-        token = talker.codec_head(past_hidden)[
-            :, -1, :code_vocab_size
-        ].argmax(dim=-1)
+        token = _select_token(
+            talker.codec_head(past_hidden),
+            primary_history[:, :frame_count],
+            eos_token_id=eos_token_id,
+            processors=processors,
+            allow_eos=stop_at_eos,
+        )
 
     if phase_events is not None:
         phase_events[3].record()
@@ -194,21 +286,14 @@ def tts_infer(
         decode_seconds = now - cpu_phase_started
         cpu_phase_started = now
 
-    # === codec: fixed GPU output, no official wrapper CPU conversion/list concat ===
+    # === codec: official decoder implementation, kept on-device ===
     speech_model = model.speech_tokenizer.model
-    decoder = speech_model.decoder
-    upsample = int(decoder.total_upsample)
-    codec_input = codes.unsqueeze(0).transpose(1, 2)
-    waveform = torch.empty((1, max_new_tokens * upsample), device=device, dtype=tts_pad.dtype)
-    chunk_size = 300
-    left_context = 25
-    for start_index in range(0, max_new_tokens, chunk_size):
-        end_index = min(start_index + chunk_size, max_new_tokens)
-        context_start = max(0, start_index - left_context)
-        decoded = decoder(codec_input[..., context_start:end_index]).squeeze(1)
-        decoded = decoded[..., (start_index - context_start) * upsample :]
-        decoded = decoded[..., : (end_index - start_index) * upsample]
-        waveform[:, start_index * upsample : end_index * upsample].copy_(decoded)
+    codes = codes[:frame_count]
+    if frame_count:
+        decoded = speech_model.decode(codes.unsqueeze(0), return_dict=False)[0]
+        waveform = decoded[0].unsqueeze(0)
+    else:
+        waveform = torch.empty((1, 0), device=device, dtype=tts_pad.dtype)
 
     if phase_events is not None:
         phase_events[4].record()
@@ -226,6 +311,6 @@ def tts_infer(
         "decode": decode_seconds,
         "codec": codec_seconds,
         "total": total_seconds,
-        "frames": float(max_new_tokens),
+        "frames": float(frame_count),
     }
     return waveform, codes, int(speech_model.get_output_sample_rate()), timings
