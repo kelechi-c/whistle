@@ -6,17 +6,17 @@
 runtime. It accepts an already-loaded official `Qwen3TTSModel`, so checkpoint
 loading is outside latency measurements. This path is fixed-length, batch-one,
 non-streaming CustomVoice inference with a compiled predictor loop and an
-eager dynamic-cache talker. It deliberately has no engine, scheduler, combined
-full-frame graph, or stochastic sampling.
+explicitly masked static-cache talker. It deliberately has no engine, scheduler,
+combined full-frame graph, or stochastic sampling.
 
 ```
 official processor + prompt embeddings
-  -> prefill: talker.forward(full prompt, DynamicCache)
+  -> prefill: talker.forward(full prompt, StaticCache)
   -> first codebook-zero token
   -> decode frame loop:
        code predictor forward x 15 residual codebooks
        -> sum all 16 codebook embeddings
-       -> talker.model forward(one token, growing DynamicCache)
+       -> compiled talker.model forward(one token, fixed StaticCache)
   -> official speech_tokenizer.decode(all frames)
   -> waveform + codec IDs
 ```
@@ -32,13 +32,11 @@ directly so its per-frame cache and each residual head are visible. It then
 calls the inner talker backbone directly, because the outer talker would invoke
 the predictor internally a second time.
 
-Codes, predictor inputs, positions, and the predictor KV storage are
-preallocated GPU tensors. The talker uses a growing `DynamicCache` (populated
-KV only, flash SDPA, not capturable); the predictor owns a 16-position
-`StaticCache` reset and reused for each frame. Batch-one decode needs no
-growing all-ones attention mask, and non-streaming conditioning always adds
-`tts_pad`, so neither mask concatenation nor a Python generation-step counter
-remains.
+Codes, predictor inputs, positions, masks, and KV storage are preallocated GPU
+tensors. The talker owns a 2,048-position `StaticCache`; the predictor owns a
+16-position cache reset and reused for each frame. The talker prebuilds its
+causal mask per cache position and copies the selected mask into one stable
+input buffer before each frame.
 
 The predictor enters its official inner transformer and fixed residual heads
 directly. Its separate embedding-table weights are stacked once per module;
@@ -53,15 +51,12 @@ Inductor owns its fusion and cudagraph tree; it is never nested inside a manual
 CUDA graph. `PredictorGraph` retains the fixed input/output buffers, positions,
 causal masks, and 16-position cache.
 
-`TalkerGraph` owns a dynamic `DynamicCache` and runs one eager inner-backbone
-forward per token (no CUDA graph). The cache grows per step and holds only
-populated KV, so SDPA takes the mask-free flash path (`attention_mask=None`,
-`is_compileable=False`, `is_causal` over populated keys) — correct and the
-cheapest eager path. A `StaticCache` here is a dead end: its zero-padded KV
-needs an explicit mask (slow, ~28 s) or, if the mask is dropped, SDPA attends
-over zero slots and the output degenerates to silence (the invalidated v5 bug).
-`DynamicCache.update` concatenates per step, so KV addresses change every frame
-and cannot be manually captured; the talker can only be graphed by compiling it.
+`talker_step` is the isolated inner-backbone forward. `TalkerGraph` uses its
+`torch.compile(mode="reduce-overhead")` variant by default. The selectable
+`cuda-graph` path instead compiles with `max-autotune-no-cudagraphs` and wraps
+that callable in one manual CUDA graph. Both variants share the same stable
+inputs, compileable `StaticCache`, and explicit per-position mask; the invalid
+mask-free static-cache path remains excluded.
 
 `decode_graphs` caches both objects per loaded talker. The predictor embedding
 weights are stacked once per predictor module. Variable-length prefill stays
@@ -88,6 +83,12 @@ library. `src/whistle/infer.py` owns model loading, WAV output, and the CLI;
 `src/whistle/inference.py` contains request scheduling; and
 `src/whistle/graphs.py` owns reusable decode state. The root `profile_tts.py`
 compares fixed-length CustomVoice split and official runs.
+
+`profile_tts.py --backend split --check-codec-parity` performs one untimed
+official greedy generation after the measurements. It retains the official
+API's `[frames, codebooks]` token tensor and requires exact shape and ID
+equality, reporting the first divergent frame/codebook. `--talker-mode`
+selects `compile` (default) or `cuda-graph`.
 
 ## inference optimization references
 

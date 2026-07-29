@@ -9,7 +9,7 @@ from qwen_tts.core.models import (
     Qwen3TTSForConditionalGeneration,
 )
 import torch
-from transformers import DynamicCache
+from transformers import StaticCache
 
 from whistle.graphs import decode_graphs
 from whistle.inference import tts_infer
@@ -123,8 +123,17 @@ class FasterDecodeTest(unittest.TestCase):
 
         graphs = decode_graphs(model.talker, 64)
         self.assertIs(graphs, decode_graphs(model.talker, 64))
-        self.assertIsInstance(graphs.talker.cache, DynamicCache)
-        self.assertEqual(graphs.talker.cache.get_max_cache_shape(), -1)
+        cuda_graphs = decode_graphs(model.talker, 64, "cuda-graph")
+        self.assertIsNot(graphs, cuda_graphs)
+        self.assertEqual(cuda_graphs.talker.mode, "cuda-graph")
+        self.assertIsInstance(graphs.talker.cache, StaticCache)
+        self.assertEqual(graphs.talker.cache.get_max_cache_shape(), 64)
+        self.assertEqual(graphs.talker.mode, "compile")
+        self.assertEqual(len(graphs.talker.mask_table), 64)
+        position = int(graphs.talker.cache_position.item())
+        self.assertTrue(
+            torch.equal(graphs.talker.mask, graphs.talker.mask_table[position])
+        )
         self.assertEqual(graphs.predictor.cache.get_max_cache_shape(), 4)
         self.assertTrue(torch.equal(first_ids, second_ids))
         decode_graphs.cache_clear()

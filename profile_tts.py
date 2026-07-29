@@ -14,6 +14,7 @@ import soundfile as sf
 import torch
 
 from whistle.config import RUNTIME
+from whistle.graphs import TalkerMode
 from whistle.inference import tts_infer
 
 Backend = Literal["split", "official"]
@@ -73,7 +74,8 @@ def _load_split(
     language: str,
     speaker: str,
     max_new_tokens: int,
-) -> tuple[Generate, torch.device, float]:
+    talker_mode: TalkerMode,
+) -> tuple[Generate, torch.device, float, Any]:
     """Loads the official model for the explicit greedy prefill/decode path."""
     model, device, load_seconds = _load_model(checkpoint or DEFAULT_MODEL)
 
@@ -84,11 +86,42 @@ def _load_split(
             language=language,
             speaker=speaker,
             max_new_tokens=max_new_tokens,
+            talker_mode=talker_mode,
         )
         phases = {name: timings[name] for name in ("prepare", "prefill", "decode", "codec")}
         return Sample(waveform[0], sample_rate, phases, codec_ids)
 
-    return generate, device, load_seconds
+    return generate, device, load_seconds, model
+
+
+def _official_sample(
+    wrapper: Any,
+    text: str,
+    language: str,
+    speaker: str,
+    max_new_tokens: int,
+) -> Sample:
+    """Runs the official API path while retaining its generated codec IDs."""
+    input_ids = wrapper._tokenize_texts([wrapper._build_assistant_text(text)])
+    generation = wrapper._merge_generate_kwargs(
+        min_new_tokens=max_new_tokens,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        repetition_penalty=1.0,
+        subtalker_dosample=False,
+    )
+    codes, _ = wrapper.model.generate(
+        input_ids=input_ids,
+        instruct_ids=[None],
+        languages=[language],
+        speakers=[speaker],
+        non_streaming_mode=True,
+        **generation,
+    )
+    wavs, sample_rate = wrapper.model.speech_tokenizer.decode(
+        [{"audio_codes": codes[0]}]
+    )
+    return Sample(_to_numpy(wavs[0]), int(sample_rate), {}, codes[0])
 
 
 def _load_official(
@@ -97,23 +130,51 @@ def _load_official(
     language: str,
     speaker: str,
     max_new_tokens: int,
-) -> tuple[Generate, torch.device, float]:
+) -> tuple[Generate, torch.device, float, Any]:
     """Loads fixed-length official CustomVoice inference for comparison."""
     wrapper, device, load_seconds = _load_model(model_name)
 
     def generate() -> Sample:
-        wavs, sample_rate = wrapper.generate_custom_voice(
-            text=text,
-            language=language,
-            speaker=speaker,
-            min_new_tokens=max_new_tokens,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            subtalker_dosample=False,
+        return _official_sample(
+            wrapper, text, language, speaker, max_new_tokens
         )
-        return Sample(_to_numpy(wavs[0]), int(sample_rate), {})
 
-    return generate, device, load_seconds
+    return generate, device, load_seconds, wrapper
+
+
+def _check_codec_parity(split: torch.Tensor, official: torch.Tensor) -> None:
+    """Requires identical codec shapes and reports the first differing token."""
+    split = split.detach().cpu()
+    official = official.detach().cpu()
+    if split.ndim != 2 or official.ndim != 2:
+        raise click.ClickException(
+            f"codec ids must be rank two: split={tuple(split.shape)}, "
+            f"official={tuple(official.shape)}"
+        )
+    if split.shape[1] != official.shape[1]:
+        raise click.ClickException(
+            f"codec id shape mismatch: split={tuple(split.shape)}, "
+            f"official={tuple(official.shape)}"
+        )
+    shared_frames = min(split.shape[0], official.shape[0])
+    shared_split = split[:shared_frames]
+    shared_official = official[:shared_frames]
+    mismatch = shared_split.ne(shared_official).nonzero()
+    if mismatch.numel() != 0:
+        frame, codebook = mismatch[0].tolist()
+        matches = shared_split.eq(shared_official).sum().item()
+        raise click.ClickException(
+            f"codec id mismatch at frame {frame}, codebook {codebook}: "
+            f"split={split[frame, codebook].item()}, "
+            f"official={official[frame, codebook].item()} "
+            f"({matches}/{shared_split.numel()} shared ids match)"
+        )
+    if split.shape != official.shape:
+        raise click.ClickException(
+            f"codec id length diverges at frame {shared_frames}: "
+            f"split={split.shape[0]} frames, official={official.shape[0]} frames"
+        )
+    print(f"codec id parity: exact match ({split.shape[0]} frames)")
 
 
 def _benchmark(
@@ -188,6 +249,13 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option(
     "--backend", type=click.Choice(["split", "official"]), default="split"
 )
+@click.option(
+    "--talker-mode",
+    type=click.Choice(["compile", "cuda-graph"]),
+    default="compile",
+    show_default=True,
+)
+@click.option("--check-codec-parity", is_flag=True)
 @click.option("--model", default=None, help="official qwen model id or path")
 @click.option("--lang", default="english")
 @click.option("--speaker", default="serena", show_default=True)
@@ -201,6 +269,8 @@ def main(
     text: str,
     text_file: pl.Path | None,
     backend: Backend,
+    talker_mode: TalkerMode,
+    check_codec_parity: bool,
     model: str | None,
     lang: str,
     speaker: str,
@@ -216,12 +286,26 @@ def main(
         text = text_file.read_text(encoding="utf-8")
     torch.manual_seed(RUNTIME.seed)
     if backend == "split":
-        loaded = _load_split(model, text, lang, speaker, max_new_tokens)
+        loaded = _load_split(
+            model, text, lang, speaker, max_new_tokens, talker_mode
+        )
     else:
         loaded = _load_official(model or DEFAULT_MODEL, text, lang, speaker, max_new_tokens)
-    generate, device, load_seconds = loaded
+    generate, device, load_seconds, wrapper = loaded
     print(f"backend: {backend}; device: {device}; load: {load_seconds:.3f}s")
     rows, sample = _benchmark(generate, device, iterations, warmup)
+    if check_codec_parity:
+        if backend != "split" or sample.codec_ids is None:
+            raise click.ClickException(
+                "codec parity checking requires the split backend"
+            )
+        print("running untimed official codec id parity check")
+        official = _official_sample(
+            wrapper, text, lang, speaker, max_new_tokens
+        )
+        if official.codec_ids is None:
+            raise RuntimeError("official generation did not return codec ids")
+        _check_codec_parity(sample.codec_ids, official.codec_ids)
     mean_wall = statistics.mean(row.wall_seconds for row in rows)
     mean_rtf = statistics.mean(row.rtf for row in rows)
     p50_wall = statistics.median(row.wall_seconds for row in rows)
@@ -262,6 +346,8 @@ def main(
     if json_out is not None:
         payload = {
             "backend": backend,
+            "talker_mode": talker_mode if backend == "split" else None,
+            "codec_parity_checked": check_codec_parity,
             "model": model,
             "text_file": str(text_file) if text_file is not None else None,
             "text_characters": len(text),
