@@ -4,9 +4,9 @@
 
 This project optimizes batch-one Qwen3-TTS 0.6B CustomVoice inference while
 retaining the official model weights and codec decoder. Benchmarks use the full
-`alicia.txt` input, Ryan, English, bfloat16 SDPA, one excluded warmup, three
-measured runs, and a fixed 1,279-frame output (102.320 seconds of audio) on an
-RTX 3050 6 GB Laptop GPU.
+`alicia.txt` input, Ryan, English, bfloat16 SDPA, three measured runs, and a
+fixed 1,279-frame output (102.320 seconds of audio) on an RTX 3050 6 GB Laptop
+GPU. V5.1 and V6 use three excluded full warmups.
 
 ## Optimization progression
 
@@ -20,6 +20,7 @@ RTX 3050 6 GB Laptop GPU.
 | V4 | CUDA graphs for predictor loop and talker pass | 64.431 s | 0.630 | −28.83% vs candidate |
 | V5 | Compiled predictor loop and talker graph | 48.106 s | 0.470 | 25.33% vs V4 (invalid) |
 | V5.1 | Explicit-mask talker graph | 64.188 s | 0.627 | −33.43% vs V5 |
+| V6 | Compiled explicit-mask talker | 56.577 s | 0.553 | 11.86% vs V5.1 (invalid) |
 
 V1 exposed the predictor and talker forwards instead of relying on nested
 Hugging Face generation. V2 kept buffers, cache positions, codec IDs, and
@@ -81,6 +82,16 @@ V5.1 shifts the decode mix to 53.98% predictor and 45.84% talker. The explicit
 mask increases total decode from 46.211 to 62.090 seconds; predictor rises
 9.36% while the talker increase is the dominant cost at 84.18%.
 
+V6 compiles that explicit-mask talker. It reduces total decode to 54.720
+seconds: 30.721 seconds (56.14%) predictor, 23.887 seconds (43.66%) talker,
+and 112.18 ms (0.20%) remaining overhead. Its 56.577-second headline p50 is
+38.32% below official. However, exact official codec-token parity fails at
+frame 1/codebook 13 after 1,181 of 20,448 shared IDs match. The first frame
+and the first thirteen codebooks of frame 1 match, so a small numerical change
+in the compiled talker hidden state crosses a later greedy predictor argmax
+boundary; autoregression then makes the sequence diverge. V6 is therefore a
+performance diagnostic, not a valid quality result.
+
 ## Conclusion
 
 Static cache is beneficial for the compiled predictor but harmful for the eager
@@ -90,11 +101,9 @@ predictor with a dynamic talker cache: the A/B candidate at 50.011 seconds p50,
 (silence after ~2 s from the `is_compileable=False` + `attention_mask=None`
 talker bug); V5.1's explicit-mask talker is correct but slow (64.188 s).
 
-The current code reverts the talker to dynamic-eager (`DynamicCache`, no graph)
-on top of the compiled predictor loop — the correct A/B configuration — so the
-trustworthy baseline is restored. The next experiment should compile the talker
-(or the full frame) with `torch.compile(mode="max-autotune-no-cudagraphs")`,
-which lets Inductor own the mask + fusion without conflicting with a manual
-CUDA graph. Manual `torch.cuda.graph` capture of the talker is a dead end on a
-`StaticCache` (explicit mask is slow; no mask is incorrect), and `DynamicCache`
-cannot be captured because its KV addresses change every step.
+The compiled-talker experiment is not a replacement for the correct dynamic
+talker baseline until it passes token parity. The next experiment is to compare
+the compiled talker hidden state and logits with an eager static-cache control
+at the first decode step, then retain only transformations that preserve the
+greedy argmax sequence. Manual `torch.cuda.graph` capture of the talker remains
+a poor fit for `DynamicCache` because its KV addresses change each step.

@@ -106,3 +106,8 @@ was 91.148 s, while its separate modular median was 100.541 s. Dynamic KV
 growth changes buffer addresses and incurs per-step concatenation/reallocation;
 the modular measurements also increased across requests. V5 remains the
 preferred measured configuration.
+
+The V6 compiled static-cache talker reached 56.577 s p50 but is invalid:
+official codec IDs first diverge at frame 1/codebook 13. Frame 0 and the first
+13 codebooks of frame 1 match, implicating a small compiled talker hidden-state
+difference that later flips a greedy predictor argmax and then compounds.

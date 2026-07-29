@@ -3,8 +3,9 @@
 ## Version summary
 
 All versions use the complete [Alicia input](alicia.txt), Ryan, English,
-bfloat16, SDPA, one excluded warmup, three measured runs, and 1,279 complete
-codec frames (102.320 seconds of audio).
+bfloat16, SDPA, three measured runs, and 1,279 complete codec frames (102.320
+seconds of audio). V5.1 and V6 exclude three full warmups; earlier results use
+their recorded warmup policy.
 
 | Version | Tag | p50 latency | p50 RTF | Throughput | Change from prior |
 |---|---|---:|---:|---:|---:|
@@ -12,6 +13,7 @@ codec frames (102.320 seconds of audio).
 | `faster_decode` v1 | Explicit decode scheduler | 71.382 s | 0.698 | 1.433× | −22.18% vs official |
 | `faster_decode` v2 | Reduced Python/CPU sync overhead | 67.974 s | 0.664 | 1.505× | −4.78% vs v1 |
 | **`faster_decode` v3** | **Static cache + torch-compiled predictor pass** | **57.477 s** | **0.562** | **1.780×** | **−15.44% vs v2** |
+| `faster_decode` v6 *(invalid)* | Compiled explicit-mask static-cache talker | 56.577 s | 0.553 | 1.808× | −11.86% vs v5.1; fails codec parity |
 
 The official baseline is retained for future version comparisons rather than
 rerun after every fast-path change.
@@ -569,3 +571,30 @@ A/B candidate (50.011 s) with the compiled predictor loop retained. The reports 
 [`benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json)
 and
 [`benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json).
+
+## `faster_decode` v6 — compiled explicit-mask talker
+
+V6 compiles the static-cache talker step with
+`torch.compile(mode="reduce-overhead")`, retaining the explicit per-position
+causal mask and the compiled predictor loop. Three full warmups were excluded.
+
+| Run | Generation latency | Audio | RTF | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 56.589 s | 102.320 s | 0.553 | 1.808× |
+| 2 | 56.577 s | 102.320 s | 0.553 | 1.808× |
+| 3 | 56.562 s | 102.320 s | 0.553 | 1.809× |
+| **p50** | **56.577 s** | **102.320 s** | **0.553** | **1.808×** |
+
+The separate modular run measured 54.720 s of decode: 30.721 s in the
+compiled predictor (56.14%), 23.887 s in the compiled talker (43.66%), and
+112.18 ms remaining overhead (0.20%). This is faster than V5.1, but is not a
+valid quality result: exact official codec-ID parity fails at frame 1,
+codebook 13 (`split=344`, `official=1484`), after 1,181 of 20,448 shared IDs
+match. Frame 0 and frame-1 codebooks 0–12 match, which localizes the first
+flip to the predictor sequence conditioned on the first compiled talker
+hidden state; autoregression then amplifies it. The modular artifact is
+[`benchmarks/v6_compiled_talker_0.6b_alicia_breakdown.json`](benchmarks/v6_compiled_talker_0.6b_alicia_breakdown.json).
+
+The profiler now writes its benchmark JSON before running the optional,
+untimed parity assertion, so future failing parity runs retain their timing
+artifact.

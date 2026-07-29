@@ -294,18 +294,6 @@ def main(
     generate, device, load_seconds, wrapper = loaded
     print(f"backend: {backend}; device: {device}; load: {load_seconds:.3f}s")
     rows, sample = _benchmark(generate, device, iterations, warmup)
-    if check_codec_parity:
-        if backend != "split" or sample.codec_ids is None:
-            raise click.ClickException(
-                "codec parity checking requires the split backend"
-            )
-        print("running untimed official codec id parity check")
-        official = _official_sample(
-            wrapper, text, lang, speaker, max_new_tokens
-        )
-        if official.codec_ids is None:
-            raise RuntimeError("official generation did not return codec ids")
-        _check_codec_parity(sample.codec_ids, official.codec_ids)
     mean_wall = statistics.mean(row.wall_seconds for row in rows)
     mean_rtf = statistics.mean(row.rtf for row in rows)
     p50_wall = statistics.median(row.wall_seconds for row in rows)
@@ -366,6 +354,18 @@ def main(
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         print(f"results saved to {json_out}")
+    if check_codec_parity:
+        if backend != "split" or sample.codec_ids is None:
+            raise click.ClickException(
+                "codec parity checking requires the split backend"
+            )
+        print("running untimed official codec id parity check")
+        official = _official_sample(
+            wrapper, text, lang, speaker, max_new_tokens
+        )
+        if official.codec_ids is None:
+            raise RuntimeError("official generation did not return codec ids")
+        _check_codec_parity(sample.codec_ids, official.codec_ids)
     if trace_out is not None:
         _trace(generate, device, trace_out)
 
