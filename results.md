@@ -598,3 +598,52 @@ hidden state; autoregression then amplifies it. The modular artifact is
 The profiler now writes its benchmark JSON before running the optional,
 untimed parity assertion, so future failing parity runs retain their timing
 artifact.
+
+## Greedy correctness recovery
+
+The optimized/static paths were compared with the official runtime under the
+same greedy settings. The original parity harness also had a one-frame budget
+error: 1,279 explicit complete frames were compared with 1,278 official
+complete frames. The corrected harness requests one additional official
+selected token and checks both codec IDs and decoded waveform samples.
+
+Short A/B diagnostics localized the numerical divergence:
+
+| Talker | Predictor | First mismatch |
+|---|---|---|
+| Static eager | Static eager | Frame 3, codebook 15 |
+| Compiled static | Static eager | Frame 5, codebook 15 |
+| Static eager | Compiled static | Frame 1, codebook 13 |
+| Official outer eager + DynamicCache | Official greedy predictor | Exact |
+
+The static masked attention, reordered bf16 embedding reduction, and compiled
+in-place cache mutations are therefore not an exact replacement for the
+official DynamicCache scheduler. The correctness default now uses the official
+outer talker forward one token at a time, while compiled/static modes remain
+available only as experiments.
+
+The original split loop also sliced primary logits to the predictor vocabulary
+(`0:2048`), excluding talker EOS token 2150, and decoded the entire fixed
+allocation. Primary logits now use official suppression rules, float32 logits
+processing, repetition penalty, argmax, and natural EOS termination. Codec
+decoding delegates to the official tokenizer model.
+
+Greedy repetition penalties 1.05 and 1.1 became nearly silent after roughly
+16 seconds on Alicia. Penalty 1.2 retained healthy energy and reached natural
+EOS:
+
+| Validation | Result |
+|---|---:|
+| Frames | 1,216 |
+| Audio duration | 97.280 s |
+| Diagnostic wall time (one cold run) | 76.049 s |
+| Codec parity | 19,456 / 19,456 IDs exact |
+| Waveform parity | 2,334,720 / 2,334,720 samples exact |
+| RMS, 0–8 s | 0.02960 |
+| RMS, 8–16 s | 0.03217 |
+| RMS, 16–32 s | 0.02785 |
+| RMS, 32–64 s | 0.02482 |
+| RMS, 64–97.28 s | 0.02298 |
+
+The machine-readable validation is
+[`benchmarks/correctness_greedy_rp1_2_parity_0.6b_alicia.json`](benchmarks/correctness_greedy_rp1_2_parity_0.6b_alicia.json).

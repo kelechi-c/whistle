@@ -31,6 +31,13 @@ by 25.33% from v4 and 47.55% from official.
 V5.1 restores an explicit talker mask and regresses 33.43% from v5; the
 fully warmed modular profile shows the talker graph rising 84.18%.
 
+Correctness status: V5 and V6 are performance diagnostics with invalid codec
+output. The default runtime now uses the `official-eager` greedy reference,
+DynamicCache, official codec decoding, EOS termination, and repetition penalty
+1.2. Its full Alicia validation exactly matches 19,456 official codec IDs and
+2,334,720 waveform samples; optimized modes must meet that parity gate before
+promotion.
+
 See [results.md](results.md) for the benchmark method, command, individual
 runs, and phase breakdown. See [report.md](report.md) for a concise optimization
 history and the talker-cache A/B findings.

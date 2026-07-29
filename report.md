@@ -10,7 +10,7 @@ GPU. V5.1 and V6 use three excluded full warmups.
 
 ## Optimization progression
 
-| Version | Main change | p50 latency | RTF | Gain from prior |
+| Version | Main change | p50 latency | RTF | Gain from vprior |
 |---|---|---:|---:|---:|
 | Official | Official nested generation runtime | 91.722 s | 0.896 | — |
 | V1 | Explicit prefill and decode scheduler | 71.382 s | 0.698 | 22.18% |
@@ -92,18 +92,84 @@ in the compiled talker hidden state crosses a later greedy predictor argmax
 boundary; autoregression then makes the sequence diverge. V6 is therefore a
 performance diagnostic, not a valid quality result.
 
+## Correctness failure and recovery
+
+### Codec-token divergence
+
+The optimized runtime was initially judged by whether it produced plausible
+audio. Exact comparison showed that this was insufficient: static eager
+talker/predictor execution first diverged from the official runtime at frame 3,
+codebook 15. Compiling the static predictor moved the first mismatch to frame
+1, codebook 13, while compiling only the static talker produced its first
+mismatch at frame 5, codebook 15.
+
+Several differences contributed to the failure:
+
+- Static-cache attention and its explicit mask changed the bf16 reduction path
+  relative to the official `DynamicCache` implementation. Tiny logit changes
+  eventually changed an `argmax`, after which autoregression amplified the
+  mismatch.
+- The compiled predictor mutated static cache storage through a different
+  execution path, making divergence occur earlier.
+- The primary logits were incorrectly sliced to the 2,048 codec-token
+  vocabulary, excluding talker EOS token 2,150.
+- Residual embeddings were combined in a different bf16 reduction order.
+- Repetition penalty and token suppression were applied to bf16 logits, while
+  the official generation path processes logits in float32.
+- The parity profiler compared differently aligned frame sets, and the decoder
+  consumed the full preallocated token buffer instead of stopping at EOS.
+
+### Silent-tail failure
+
+The audio was not physically truncated at eight seconds. Under greedy
+generation, repetition penalties 1.05 and 1.1 caused the model to enter a
+low-energy repetitive state after roughly 16 seconds, so the remainder sounded
+cut off despite still containing samples. This generation-policy collapse was
+separate from the codec-token parity failure.
+
+Raising the greedy repetition penalty to 1.2 prevented that collapse for the
+test input: signal energy remained healthy throughout the 97.28-second output,
+and the model reached EOS naturally.
+
+### Fix
+
+The correctness reference now follows the official numerical path while
+retaining greedy `argmax` selection:
+
+- use `DynamicCache` and the official outer talker forward one token at a time;
+- use the official greedy residual predictor;
+- preserve the official bf16 embedding reduction order;
+- apply repetition penalty, suppression rules, and `argmax` to float32 logits;
+- keep the full talker vocabulary so EOS remains reachable;
+- stop and trim the generated sequence at EOS;
+- align complete frames correctly in the parity profiler; and
+- decode with the official codec tokenizer rather than a duplicate decoder.
+
+This is a correctness baseline, not the final optimized design. Manual CUDA
+graph capture is incompatible with changing `DynamicCache` storage addresses.
+Any future static-cache implementation must reproduce the official
+populated-key attention math before graph capture or compilation is considered
+valid.
+
+### Validation
+
+With repetition penalty 1.2, the repaired greedy path reached natural EOS after
+1,216 frames and matched the official runtime exactly:
+
+| Check | Result |
+| --- | ---: |
+| Codec IDs | 19,456 / 19,456 exact |
+| Waveform samples | 2,334,720 / 2,334,720 exact |
+| Audio duration | 97.28 s |
+| RMS, 0–8 s | 0.02960 |
+| RMS, 8–16 s | 0.03217 |
+| RMS, 16–32 s | 0.02785 |
+| RMS, 32–64 s | 0.02482 |
+| RMS, 64–97.28 s | 0.02298 |
+
 ## Conclusion
 
-Static cache is beneficial for the compiled predictor but harmful for the eager
-talker. The best *correct* measured configuration is a compiled static-cache
-predictor with a dynamic talker cache: the A/B candidate at 50.011 seconds p50,
-1.834× faster than the official baseline. V5's 48.106-second result is invalid
-(silence after ~2 s from the `is_compileable=False` + `attention_mask=None`
-talker bug); V5.1's explicit-mask talker is correct but slow (64.188 s).
-
-The compiled-talker experiment is not a replacement for the correct dynamic
-talker baseline until it passes token parity. The next experiment is to compare
-the compiled talker hidden state and logits with an eager static-cache control
-at the first decode step, then retain only transformations that preserve the
-greedy argmax sequence. Manual `torch.cuda.graph` capture of the talker remains
-a poor fit for `DynamicCache` because its KV addresses change each step.
+V5 and V6 latency results remain invalid because those paths fail exact token
+parity. The official-eager greedy path is now the correctness reference.
+Optimized variants must match its complete codec-token and waveform output
+before their latency results are treated as valid.
