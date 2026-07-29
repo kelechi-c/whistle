@@ -16,6 +16,7 @@ canonical [Alicia input](alicia.txt):
 | **v3** | **Static cache + torch-compiled predictor pass** | **57.477 s** | **0.562** | **1.780×** |
 | v4 | CUDA graphs for predictor loop + talker pass | 64.431 s | 0.630 | 1.588× |
 | **v5** | **Torch-compiled predictor loop + talker graph** | **48.106 s** | **0.470** | **2.127×** |
+| v5.1 | Explicit-mask talker graph | 64.188 s | 0.627 | 1.594× |
 
 Every version emits 1,279 complete codec frames, or 102.320 seconds of audio.
 Lower latency and RTF are better. Measurements use an RTX 3050 6 GB Laptop GPU
@@ -27,6 +28,8 @@ but regresses 12.10% from v3 because it replays an uncompiled predictor loop
 and retains full-capacity static-cache talker attention. V5 compiles the full
 predictor loop instead of explicitly graph-capturing it, reducing p50 latency
 by 25.33% from v4 and 47.55% from official.
+V5.1 restores an explicit talker mask and regresses 33.43% from v5; the
+fully warmed modular profile shows the talker graph rising 84.18%.
 
 See [results.md](results.md) for the benchmark method, command, individual
 runs, and phase breakdown. See [report.md](report.md) for a concise optimization

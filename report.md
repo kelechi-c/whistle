@@ -19,6 +19,7 @@ RTX 3050 6 GB Laptop GPU.
 | A/B candidate | V3 with dynamic talker cache | 50.011 s | 0.489 | 12.91% |
 | V4 | CUDA graphs for predictor loop and talker pass | 64.431 s | 0.630 | −28.83% vs candidate |
 | V5 | Compiled predictor loop and talker graph | 48.106 s | 0.470 | 25.33% vs V4 |
+| V5.1 | Explicit-mask talker graph | 64.188 s | 0.627 | −33.43% vs V5 |
 
 V1 exposed the predictor and talker forwards instead of relying on nested
 Hugging Face generation. V2 kept buffers, cache positions, codec IDs, and
@@ -34,6 +35,11 @@ V5 disabled explicit predictor graph capture and compiled the complete
 predictor loop with `torch.compile(mode="reduce-overhead")`; the talker graph
 remained captured. It is the fastest measured configuration at 48.106 seconds
 p50, 1.906× faster than official.
+
+V5.1 adds an explicit causal mask to the talker graph. It requires three full
+excluded warmups to remove a late setup pass, then stabilizes at 64.188 seconds
+p50. The talker graph rises from 15.452 to 28.459 seconds, an 84.18%
+regression.
 
 ## Findings
 
@@ -65,6 +71,10 @@ V5 restores the compiled predictor advantage: predictor-loop time falls from
 26.180 to 15.452 seconds in the measured configuration. Total decode reaches
 46.211 seconds: 66.32% predictor, 33.44% talker, and 0.24% remaining overhead.
 
+V5.1 shifts the decode mix to 53.98% predictor and 45.84% talker. The explicit
+mask increases total decode from 46.211 to 62.090 seconds; predictor rises
+9.36% while the talker increase is the dominant cost at 84.18%.
+
 ## Conclusion
 
 Static cache is beneficial for the compiled predictor but currently harmful
@@ -77,3 +87,4 @@ capture alone is insufficient: the next experiment should capture a compiled
 full-frame predictor and avoid full-capacity talker attention. V5 effectively
 validates the first half of that direction: preserve the compiler-managed
 predictor graph tree rather than replacing it with an eager CUDA graph.
+The explicit-mask talker path should remain disabled for this workload.

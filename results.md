@@ -495,3 +495,63 @@ isolated talker change without another A/B. The reports are
 [`benchmarks/v5_faster_decode_0.6b_alicia.json`](benchmarks/v5_faster_decode_0.6b_alicia.json)
 and
 [`benchmarks/v5_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v5_faster_decode_0.6b_alicia_breakdown.json).
+
+## `faster_decode` v5.1 — explicit-mask talker graph
+
+V5.1 retains V5's compiled predictor loop and talker CUDA graph, with an
+explicit per-position causal mask copied into the talker graph input. One
+warmup left a late setup pass in the first measured iteration, so the canonical
+result uses three excluded full-inference warmups before three measurements.
+
+```bash
+PYTHONPATH=src uv run --no-sync python profile_tts.py \
+  --text-file alicia.txt \
+  --backend split \
+  --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --speaker Ryan \
+  --lang English \
+  --max-new-tokens 1279 \
+  --warmup 3 \
+  --iterations 3 \
+  --json-out benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json
+```
+
+### Per-run results
+
+| Run | Generation latency | Audio | RTF | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 64.200 s | 102.320 s | 0.627 | 1.594× |
+| 2 | 64.188 s | 102.320 s | 0.627 | 1.594× |
+| 3 | 64.165 s | 102.320 s | 0.627 | 1.595× |
+| **p50** | **64.188 s** | **102.320 s** | **0.627** | **1.594×** |
+
+### Aggregate results
+
+| Metric | Result |
+|---|---:|
+| Cached model load | 21.855 s |
+| Mean generation latency | 64.184 s |
+| Generation latency range | 64.165–64.200 s |
+| Mean RTF | 0.627 |
+| Peak allocated GPU memory | 3,150.5 MiB |
+
+V5.1 is 33.43% slower than V5 but remains 30.02% lower latency than official
+inference.
+
+### Modular breakdown
+
+The modular run uses the same three excluded warmups.
+
+| Decode module | Calls | p50 latency | Share of decode | Average |
+|---|---:|---:|---:|---:|
+| Compiled predictor loop | 1,279 | 33.516 s | 53.98% | 26.205 ms/frame |
+| Explicit-mask talker graph | 1,278 | 28.459 s | 45.84% | 22.269 ms/step |
+| Other decode overhead | — | 122.46 ms | 0.20% | 0.096 ms/frame |
+| **Total decode** | — | **62.090 s** | **100%** | — |
+
+Compared with V5, the predictor loop rises 9.36%, while the explicit-mask
+talker graph rises 84.18% (15.452 to 28.459 seconds). The talker regression is
+the main reason this version should not replace V5. The reports are
+[`benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json)
+and
+[`benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json).
