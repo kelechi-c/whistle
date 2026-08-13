@@ -1,5 +1,9 @@
 # project notes
 
+`docs/technical_deep_dive.md` is the comprehensive artifact: full codebase map,
+benchmark contract, and every optimization (V1–V7) with diagrams. This file
+stays the working jotter; the deep dive is the reference for the article.
+
 ## src/whistle/inference.py - official-module latency path
 
 `tts_infer` is the batch-one greedy CustomVoice path. It accepts an already
@@ -71,8 +75,8 @@ forward/cache structure, not real speech quality or full-checkpoint latency.
 The former model reimplementation and its fixture tooling/tests are
 archived under the ignored local `stash/nero_reimplementation/` directory.
 Active code imports model components only from the installed `qwen-tts`
-library. `src/whistle/infer.py` owns model loading, WAV output, and the CLI;
-`src/whistle/inference.py` contains request scheduling; and
+library. The repository-root `infer.py` owns model loading, WAV output, and the
+CLI; `src/whistle/inference.py` contains request scheduling; and
 `src/whistle/graphs.py` owns reusable decode state. The root `profile_tts.py`
 compares fixed-length CustomVoice split and official runs.
 
@@ -127,3 +131,9 @@ V7 is promoted to `src/whistle/graphs.py` and is the default `tts_infer` mode.
 per-codebook graphs; `DecoderFfnGraph` wraps each talker layer while leaving
 prefill and variable-length attention eager. `official-eager` remains the
 explicit reference mode.
+
+The standalone `mini_qwen3` LLM package moved from `hoot/` to
+`/home/tensor/code/ml/decode-lab/src/qwen3_lm` (renamed `qwen3_lm`). It is the
+triton kernel surgery lab whose kernels will eventually port back into
+Whistle's talker FFN and residual predictor.
+

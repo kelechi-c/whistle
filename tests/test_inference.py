@@ -9,9 +9,9 @@ from qwen_tts.core.models import (
     Qwen3TTSForConditionalGeneration,
 )
 import torch
-from transformers import StaticCache
+from transformers import DynamicCache
 
-from whistle.graphs import decode_graphs
+from whistle.graphs import OfficialTalker, PredictorGraphs, decode_graphs
 from whistle.inference import tts_infer
 
 
@@ -28,21 +28,20 @@ class TinyProcessor:
 
 
 class TinyCodec:
-    """Provides the direct tensor codec surface used by optimized inference."""
+    """Provides the official tensor codec surface used by optimized inference."""
 
     total_upsample = 16
 
     def __init__(self) -> None:
         self.model = self
-        self.decoder = self
 
-    def __call__(self, codes: torch.Tensor) -> torch.Tensor:
-        samples = codes.shape[-1] * self.total_upsample
-        return torch.zeros(
-            (codes.shape[0], 1, samples),
-            device=codes.device,
-            dtype=torch.float32,
-        )
+    def decode(
+        self, codes: torch.Tensor, return_dict: bool = False
+    ) -> tuple[list[torch.Tensor], int]:
+        del return_dict
+        samples = codes.shape[1] * self.total_upsample
+        audio = torch.zeros(samples, device=codes.device, dtype=torch.float32)
+        return ([audio], 24_000)
 
     def get_output_sample_rate(self) -> int:
         return 24_000
@@ -112,6 +111,7 @@ class FasterDecodeTest(unittest.TestCase):
                 "hi",
                 speaker="ryan",
                 max_new_tokens=2,
+                stop_at_eos=False,
             )
             first_ids = codec_ids.clone()
             _, second_ids, _, _ = tts_infer(
@@ -119,6 +119,7 @@ class FasterDecodeTest(unittest.TestCase):
                 "hi",
                 speaker="ryan",
                 max_new_tokens=2,
+                stop_at_eos=False,
             )
 
         graphs = decode_graphs(model.talker, 64)
@@ -126,15 +127,11 @@ class FasterDecodeTest(unittest.TestCase):
         cuda_graphs = decode_graphs(model.talker, 64, "cuda-graph")
         self.assertIsNot(graphs, cuda_graphs)
         self.assertEqual(cuda_graphs.talker.mode, "cuda-graph")
-        self.assertIsInstance(graphs.talker.cache, StaticCache)
-        self.assertEqual(graphs.talker.cache.get_max_cache_shape(), 64)
-        self.assertEqual(graphs.talker.mode, "compile")
-        self.assertEqual(len(graphs.talker.mask_table), 64)
-        position = int(graphs.talker.cache_position.item())
-        self.assertTrue(
-            torch.equal(graphs.talker.mask, graphs.talker.mask_table[position])
-        )
-        self.assertEqual(graphs.predictor.cache.get_max_cache_shape(), 4)
+        self.assertIsInstance(graphs.talker, OfficialTalker)
+        self.assertIsInstance(graphs.predictor, PredictorGraphs)
+        self.assertIsInstance(graphs.talker.cache, DynamicCache)
+        self.assertEqual(graphs.talker.cache.get_max_cache_shape(), -1)
+        self.assertEqual(graphs.predictor.cache.get_max_cache_shape(), -1)
         self.assertTrue(torch.equal(first_ids, second_ids))
         decode_graphs.cache_clear()
         self.assertEqual(waveform.shape, (1, 32))

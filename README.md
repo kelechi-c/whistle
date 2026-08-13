@@ -1,7 +1,7 @@
 # Whistle
 
-Minimal Qwen3-TTS and Qwen3-ASR inference experiments focused on reducing
-generation latency.
+Minimal Qwen3-TTS inference experiments focused on reducing generation
+latency.
 
 ## Headline TTS benchmarks
 
@@ -44,4 +44,6 @@ generated before its graph wrappers were installed: all 20,480 codec IDs and
 
 See [results.md](results.md) for the benchmark method, command, individual
 runs, and phase breakdown. See [report.md](report.md) for a concise optimization
-history and the talker-cache A/B findings.
+history and the talker-cache A/B findings. For the complete codebase map and
+an in-depth explanation of every optimization with diagrams, see
+[docs/technical_deep_dive.md](docs/technical_deep_dive.md).
