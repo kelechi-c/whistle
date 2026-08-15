@@ -280,7 +280,7 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option(
     "--talker-mode",
     type=click.Choice(
-        ["official-eager", "predictor-ffn-graphs", "compile", "cuda-graph"]
+        ["official-eager", "predictor-ffn-graphs"]
     ),
     default="predictor-ffn-graphs",
     show_default=True,

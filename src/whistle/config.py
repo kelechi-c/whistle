@@ -17,10 +17,9 @@ class RuntimeConfig:
     checkpoint: pl.Path = pl.Path("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
     output: pl.Path = pl.Path("whistle.wav")
     device: DeviceChoice = "auto"
-    dtype: DTypeChoice = "bflloat16"
+    dtype: DTypeChoice = "bfloat16"
     seed: int = 0
     max_frames: int = 1_280
-    frames_per_character: float = 0.25
 
     def resolved_device(self) -> torch.device:
         """Selects CUDA only when requested or available under auto mode."""

@@ -124,9 +124,6 @@ class FasterDecodeTest(unittest.TestCase):
 
         graphs = decode_graphs(model.talker, 64)
         self.assertIs(graphs, decode_graphs(model.talker, 64))
-        cuda_graphs = decode_graphs(model.talker, 64, "cuda-graph")
-        self.assertIsNot(graphs, cuda_graphs)
-        self.assertEqual(cuda_graphs.talker.mode, "cuda-graph")
         self.assertIsInstance(graphs.talker, OfficialTalker)
         self.assertIsInstance(graphs.predictor, PredictorGraphs)
         self.assertIsInstance(graphs.talker.cache, DynamicCache)

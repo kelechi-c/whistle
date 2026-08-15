@@ -10,9 +10,6 @@ dependencies = [
     "soundfile>=0.14.0",
 ]
 
-[project.scripts]
-whistle = "whistle.infer:main"
-
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
