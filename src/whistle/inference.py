@@ -35,42 +35,18 @@ def _select_token(
     return scores.argmax(dim=-1)
 
 
-@torch.inference_mode()
-def tts_infer(
+def build_prompt(
     tts: Qwen3TTSModel,
     text: str,
     *,
-    speaker: str = "serena",
-    language: str = "english",
-    max_new_tokens: int = 1_280,
-    talker_mode: TalkerMode = "predictor-ffn-graphs",
-    stop_at_eos: bool = True,
-    repetition_penalty: float = 1.2,
-) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
-    """Runs batch-one CustomVoice inference through explicit forward passes.
-
-    Prefill builds the complete non-streaming text/speaker prompt and fills the
-    persistent talker cache. Decode emits at most ``max_new_tokens`` frames and
-    normally stops before codec EOS. Tokens and waveform remain on-device until
-    the caller explicitly transfers the completed outputs.
-    """
-    if max_new_tokens < 1:
-        raise ValueError("max_new_tokens must be positive")
-    if repetition_penalty <= 0:
-        raise ValueError("repetition_penalty must be positive")
-
-    started = time.perf_counter()
-    model = tts.model
-    talker = model.talker
-    predictor = talker.code_predictor
-    config = model.config
+    language: str,
+    speaker: str,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.nn.Module]:
+    """Builds the official CustomVoice prompt tensors (verbatim from tts_infer)."""
+    talker = tts.model.talker
+    config = tts.model.config
     talker_config = config.talker_config
-    device = next(model.parameters()).device
-    cuda_timing = device.type == "cuda"
-    phase_events = [torch.cuda.Event(enable_timing=True) for _ in range(5)] if cuda_timing else None
-    if phase_events is not None:
-        phase_events[0].record()
-    cpu_phase_started = started
 
     tts._validate_languages([language])
     tts._validate_speakers([speaker])
@@ -141,7 +117,49 @@ def tts_infer(
         dim=1,
     )
     attention_mask = torch.ones(talker_input.shape[:2], device=device, dtype=torch.long)
-    prefill_length = talker_input.shape[1]
+    return talker_input, attention_mask, tts_pad, talker_input.shape[1], codec_embeddings
+
+
+@torch.inference_mode()
+def tts_infer(
+    tts: Qwen3TTSModel,
+    text: str,
+    *,
+    speaker: str = "serena",
+    language: str = "english",
+    max_new_tokens: int = 1_280,
+    talker_mode: TalkerMode = "predictor-ffn-graphs",
+    stop_at_eos: bool = True,
+    repetition_penalty: float = 1.2,
+) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
+    """Runs batch-one CustomVoice inference through explicit forward passes.
+
+    Prefill builds the complete non-streaming text/speaker prompt and fills the
+    persistent talker cache. Decode emits at most ``max_new_tokens`` frames and
+    normally stops before codec EOS. Tokens and waveform remain on-device until
+    the caller explicitly transfers the completed outputs.
+    """
+    if max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be positive")
+    if repetition_penalty <= 0:
+        raise ValueError("repetition_penalty must be positive")
+
+    started = time.perf_counter()
+    model = tts.model
+    talker = model.talker
+    predictor = talker.code_predictor
+    config = model.config
+    talker_config = config.talker_config
+    device = next(model.parameters()).device
+    cuda_timing = device.type == "cuda"
+    phase_events = [torch.cuda.Event(enable_timing=True) for _ in range(5)] if cuda_timing else None
+    if phase_events is not None:
+        phase_events[0].record()
+    cpu_phase_started = started
+
+    talker_input, attention_mask, tts_pad, prefill_length, codec_embeddings = build_prompt(
+        tts, text, language=language, speaker=speaker, device=device
+    )
     if prefill_length + max_new_tokens - 1 > MAX_CACHE_LEN:
         raise ValueError("prompt and frames exceed the fixed talker cache capacity")
     graphs = decode_graphs(talker, MAX_CACHE_LEN, talker_mode)
