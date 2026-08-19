@@ -42,6 +42,25 @@ output. V7 passed an independent full-sequence validation against a reference
 generated before its graph wrappers were installed: all 20,480 codec IDs and
 2,457,600 waveform samples matched exactly.
 
+## Head-to-head vs `faster-qwen3-tts`
+
+Same GPU, identical protocol (RTX 3050 6 GB Laptop GPU, 0.6B CustomVoice,
+alicia input, greedy decode, repetition penalty 1.2, fixed 1,279 frames):
+
+| Engine | p50 wall | RTF | Throughput | Parity |
+|---|---:|---:|---:|---|
+| `faster-qwen3-tts` 0.3.2 | 66.6 s | 0.651 | 1.54× | not bit-exact |
+| **whistle v7** | **56.9 s** | **0.556** | **1.80×** | exact |
+
+Whistle is ~14.5% faster than `faster-qwen3-tts` on identical hardware while
+also holding exact codec-ID + waveform parity. The gap comes from keeping the
+talker's growing-KV attention on the cheap dynamic-cache path (their static
+full-capacity talker attends over padding and was measured ~28% slower) plus a
+leaner on-device hot loop (preallocated buffers, no per-step list/stack/clone).
+
+`docs/qwen3_tts_official_vs_faster.md` analyzes the two implementations in
+detail.
+
 See [results.md](results.md) for the benchmark method, command, individual
 runs, and phase breakdown. See [report.md](report.md) for a concise optimization
 history and the talker-cache A/B findings. For the complete codebase map and
