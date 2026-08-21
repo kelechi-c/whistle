@@ -386,21 +386,38 @@ is the product.
 
 ---
 
-## 7. What's left on the table
+## 7. What's left on the table — and what the next session ruled out
 
-Decode is 96.7% of wall time, and the predictor is ~66% of decode. In priority
-order: fuse the predictor into a persistent device-side loop that preserves the
-official GEMV accumulation order; grow talker graph regions around
-shape-invariant projections without touching variable-length attention; bucket
-the codec decode (ceiling ≈ 3.2%); move stopping/scheduling fully on-device
-(ceiling ≈ 1.3%); then, as separately labeled quality experiments, weight-only
-int8 GEMV and speculative decoding — never mixed into the exact-output
-benchmark. A companion Triton lab (fused RMSNorm+residual, fused SwiGLU, eager
-parity references) exists for exactly this pipeline.
+Decode is 96.7% of wall time, and the predictor is ~66% of decode. The post-V7
+priority list has since been partially consumed, mostly by failure (section 9):
 
-The standing rule for every future version: no latency claim enters the
-headline table until it passes the independent full codec-token and waveform
-validation.
+- **On-device stopping: done.** The chunked-EOS scan (§9.1) removed the
+  per-frame host sync from the serving path and is the one post-V7 change
+  promoted to main.
+- **Bigger talker graph regions: tried, failed.** Whole-frame graphs (combined
+  and dual) replaced the dynamic attention with a static 2048-slot masked
+  attention and measured ~8% slower, with parity failing at frame 1 and
+  long-form quality collapsing to silence. The dynamic eager talker stays.
+- **Fused kernels: tried, failed on the only terms that count.** A Triton
+  RMSNorm→QKV fusion was speed-neutral and not bit-exact — and non-bit-exact
+  kernels degenerate greedy generation end-to-end (100% WER). Kernel work is
+  only viable if it preserves the official GEMV accumulation order bit-for-bit;
+  scheduling and graph replay remain the better investment.
+
+What genuinely remains:
+
+1. Output-length-bucketed codec decode capture/compilation — ceiling ≈ 3.2%.
+2. The residual ~1% of device-side frame scheduling not covered by chunked EOS.
+3. Bitwise-exact fused predictor kernels for the 15-step loop (not approximate
+   Triton).
+4. Separately labeled quality experiments — weight-only int8 GEMV, speculative
+   decoding — never mixed into the exact-output benchmark.
+
+A companion Triton lab (fused RMSNorm+residual, fused SwiGLU, eager parity
+references) exists for the pipeline, with the bitwise-exactness rule as its
+gate. The standing rule for every future version stays: no latency claim enters
+the headline table until it passes the independent full codec-token and
+waveform validation.
 
 ---
 
@@ -420,3 +437,127 @@ validation.
 5. **Fastest ≠ best.** The two fastest measurements in the project's history
    were deleted. The parity gate is the reason the surviving number means
    anything.
+## 9. After V7: the next optimizations met the parity wall
+
+The post-V7 session attacked the two items left on the table — bigger graph
+regions and fused kernels — and both met the same wall: bit-identity under
+greedy autoregression. The full record (every failure mode, IR-level details,
+tooling traps) lives in `failures_and_trials.md`; this is the report version.
+
+### 9.1 The one change that survived: chunked EOS
+
+V2 had removed the per-frame `.item()` host sync from the fixed-budget path,
+but the serving path still drained the GPU once per frame checking EOS.
+Replacing it with a device-side scan of emitted codec rows every 8 frames
+(plus the final frame) lets the GPU run ahead, and the trim is identical by
+construction: the EOS row is written, detected, and sliced away. Promoted to
+main and re-verified: codec + audio parity exact.
+
+### 9.2 Whole-frame CUDA graphs: measured slower, not faster
+
+Both new topologies — one combined graph per frame and the
+faster-qwen3-tts-style split (predictor graph + talker graph) — were ~8%
+*slower* than the eager default on the full 1,024 s benchmark. The entire
+penalty is the static 2048-slot masked attention replacing the dynamic
+prefix; topology (1 vs 2 graphs) is timing-neutral. Parity failed at frame 1
+(the known static-cache divergence class), short audio stayed perfect
+(Qwen3-ASR WER 0%), and the diverged long-form trajectory hit the greedy
+low-energy collapse — digital silence after ~30 s.
+
+### 9.3 The fusion experiment and the bitwise-exactness verdict
+
+A Triton RMSNorm→QKV kernel (one launch replacing norm + three GEMVs + two
+head-norms) measured speed-neutral at batch one — the path is bandwidth-bound
+on the weight loads, which fusion does not reduce — and its accumulation-order
+drift (0–26% of elements bit-exact) compounded across layers and frames into
+100% WER end-to-end. Conclusion: *equivalence isn't identity* generalizes to
+kernels. In this decoder, only bitwise-exact fusion survives; inside a CUDA
+graph launch-fusion is worthless anyway, because launches are already free.
+
+### 9.4 Same-GPU verdict vs faster-qwen3-tts
+
+The installed 0.3.2, same protocol (alicia, Ryan, rp 1.2, fixed 1,279 frames,
+fresh process, RTX 3050): whistle 56.71 s / RTF 0.554 vs faster 66.52 s /
+RTF 0.650 — whistle ~14.8% faster while holding exact parity (faster does
+not). Both engines converge on the same thesis from opposite directions — the
+model is fine; the scheduling is the product — and both pay the static-attention
+tax the eager default avoids.
+
+The standing rule survives intact: no latency claim enters the headline table
+until the independent full codec-token and waveform validation passes. It has
+rejected the fastest result in the project's history twice, and it was right
+both times.
+
+## 10. Temperature sampling: the model's native mode
+
+The checkpoint's `generation_config.json` ships `do_sample: true` — temperature
+0.9, top_k 50, top_p 1.0, repetition penalty 1.05, mirrored for the subtalker.
+Greedy was our benchmark contract, not the model's default. Adding sampling to
+the split path measures a clear regression on both axes (alicia full, Ryan,
+fresh process):
+
+| Mode | wall | RTF | WER | CER |
+|---|---:|---:|---:|---:|
+| greedy (rp 1.2) | 56.72 s | 0.554 | 3.02% | 0.82% |
+| sampled t0.9/k50 (rp 1.2) | 74.16 s | 0.724 | 6.47% | 3.40% |
+| sampled t0.9/k50 (rp 1.05, official recipe) | 73.55 s | 0.718 | 4.74% | 1.75% |
+
+Speed regresses ~30% because the sampled predictor must fall back to its eager
+15-step loop — the captured graphs bake the greedy `argmax` — plus the
+per-frame sampling kernels. WER regresses because sampling occasionally draws
+non-canonical tokens that the ASR marks as mispronunciations; greedy argmax is
+the friendliest policy for this metric. Two side-findings matter more: the
+official rp 1.05 pair beats rp 1.2 under sampling, and the same greedy path
+scores 38.79% WER on serena but 3.02% on Ryan — the voice embedding dominates
+this metric, which is why the default speaker is now Ryan. Sampling remains a
+labeled naturalness experiment, not a latency or quality path.
+
+## 11. Beyond alicia: stress, streaming, and the predictor that refuses to be approximated
+
+The trimmed V7 path was driven hard on a fresh corpus (`testdata/`) — seven
+generated texts from 7 words to 1,560, including punctuation-heavy and
+deliberately repetitive inputs, plus a real streaming-latency pass. RTF held
+at 0.54–0.56 across every text (no speed regression), and bit-exactness
+survived on a completely new long story: **codec parity exact (549 frames,
+1,054,080 samples) against the official API**. On the stories the official
+runtime was 1.34× and 1.60× slower — the headline speedup is not an alicia
+artifact. Two caveats surfaced: symbol-heavy text (URLs, numbers) is spoken
+verbatim, so raw-text WER on it is an eval artifact, not a synthesis defect;
+and a 200-word "la la la" input triggers the known greedy low-energy collapse
+(412% WER) — a model-behavior failure mode, not a V7 regression. Streaming
+(`stream_tts`, 12-frame chunks) delivers first audio in ~0.9 s and decodes
+chunks at 1.71–1.78× realtime.
+
+### 11.1 Why the codebook predictor is so sensitive
+
+Every bit-level perturbation this project has tried — compiled talker (V6),
+static-cache attention (frame-graph), QKV projection fusion, w8a16 talker
+quantization — diverged **first at a residual codebook argmax**, never at the
+primary token. The mechanism: book k's token is the argmax of its own head and
+is embedded into book k+1's input (a sequential chain that cascades through
+all 15 books within one frame); all 16 codes sum into the next frame's talker
+input (one flip perturbs the whole trajectory); residual codebooks encode the
+hard-to-predict remainder with thin logit margins, so any numeric noise crosses
+the argmax boundary easily where primary tokens sit on a stable plateau; and
+greedy selection has zero probability hedging — a flipped argmax is permanent.
+Give this model any approximate change in the talker→predictor path and the
+residual argmaxes blow first.
+
+### 11.2 The w8a16 quantization lab
+
+Sandbox experiment: per-channel int8 weights (fp32 scales, dequant-to-fp16
+GEMV) applied to the talker's MLP linears only — attention projections, norms,
+embeddings, the codec head, and the entire residual predictor stayed full
+precision. Both variants (MLP-only and MLP+codec head) cut talker-MLP weight
+storage by 49.8% and changed wall latency by **nothing** (56.79 s vs 56.78 s
+clean — at batch one the path is memory-bound and dequant-fp16 tensor-core
+GEMMs match bf16), but the quality loss was catastrophic: the int8 rounding
+flipped a predictor argmax at frame 0/codebook 1 and dragged greedy into the
+low-energy collapse (alicia WER 100–199%). The first-divergence-is-a-residual
+signature confirms 11.1: quantization of anything upstream of the residual
+argmaxes needs bit-exact-grade numerics or sampling, and this model accepts
+neither cheaply.
+
+The standing rule survives again: no latency claim enters the headline table
+without full codec-token + waveform validation, and no approximate kernel is
+worth a headline number that the predictor's argmaxes will quietly invalidate.
