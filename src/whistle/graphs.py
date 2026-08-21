@@ -1,17 +1,11 @@
 """Static-cache eager/CUDA-graph decode blocks for Whistle Qwen3-TTS."""
 
 from functools import cache
-from typing import Any, Literal, TypeAlias
+from typing import Any
 
 import torch
 from transformers import DynamicCache
 from transformers.cache_utils import Cache, CacheLayerMixin
-
-TalkerMode: TypeAlias = Literal[
-    "official-eager",
-    "predictor-ffn-graphs",
-]
-
 
 class PrefixStaticLayer(CacheLayerMixin):
     """Preallocates predictor KV storage while exposing only valid positions."""
@@ -86,27 +80,6 @@ def prefix_cache(config: Any, max_cache_len: int) -> Cache:
             for _ in range(config.num_hidden_layers)
         ]
     )
-
-
-class OfficialPredictor:
-    """Runs the residual codebooks through the official dynamic-cache generator."""
-
-    def __init__(self, predictor: Any) -> None:
-        self.predictor = predictor
-        self.groups = predictor.config.num_code_groups - 1
-
-    def capture(self) -> None:
-        """Leaves the correctness reference eager and allocation-compatible."""
-
-    def run(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Returns the official greedy residual sequence for one talker token."""
-        return self.predictor.generate(
-            inputs_embeds=inputs,
-            max_new_tokens=self.groups,
-            do_sample=False,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
-        ).sequences
 
 
 class PredictorGraphs:
@@ -249,8 +222,6 @@ class DecoderFfnGraph(torch.nn.Module):
 class OfficialTalker:
     """Runs one inner-talker token with the official growing dynamic cache."""
 
-    mode: TalkerMode = "official-eager"
-
     def __init__(
         self,
         model: torch.nn.Module,
@@ -309,21 +280,16 @@ class DecodeGraphs:
         device: torch.device,
         dtype: torch.dtype,
         max_cache_len: int,
-        talker_mode: TalkerMode,
     ) -> None:
         self.ffn_graphs: tuple[DecoderFfnGraph, ...] = ()
-        if talker_mode == "official-eager":
-            self.predictor = OfficialPredictor(talker.code_predictor)
-            self.talker = OfficialTalker(talker.model, device, max_cache_len)
-        elif talker_mode == "predictor-ffn-graphs":
-            self.predictor = PredictorGraphs(
-                talker.code_predictor,
-                talker.config.hidden_size,
-                device,
-                dtype,
-            )
-            self.talker = OfficialTalker(talker.model, device, max_cache_len)
-            if device.type == "cuda":
+        self.predictor = PredictorGraphs(
+            talker.code_predictor,
+            talker.config.hidden_size,
+            device,
+            dtype,
+        )
+        self.talker = OfficialTalker(talker.model, device, max_cache_len)
+        if device.type == "cuda":
                 wrappers = []
                 for index, layer in enumerate(talker.model.layers):
                     wrapper = DecoderFfnGraph(
@@ -353,12 +319,11 @@ class DecodeGraphs:
 def decode_graphs(
     talker: torch.nn.Module,
     max_cache_len: int,
-    talker_mode: TalkerMode = "predictor-ffn-graphs",
 ) -> DecodeGraphs:
     """Creates persistent graph objects and allocations once per talker module."""
     parameter = next(talker.parameters())
     graphs = DecodeGraphs(
-        talker, parameter.device, parameter.dtype, max_cache_len, talker_mode
+        talker, parameter.device, parameter.dtype, max_cache_len
     )
     graphs.capture()
     return graphs

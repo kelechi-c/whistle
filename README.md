@@ -1,68 +1,90 @@
 # Whistle
 
-Minimal Qwen3-TTS inference experiments focused on reducing generation
-latency.
+Minimal Qwen3-TTS batch-one inference runtime supporting the promoted V7 path
+alone: predictor CUDA graphs + talker residual-FFN graphs, eager dynamic talker
+attention, chunked-EOS, exact parity with the official runtime (every codec ID
+and waveform sample).
 
-## Headline TTS benchmarks
+## Install / run
 
-Official `qwen-tts` runtime, `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`, and the
-canonical [Alicia input](alicia.txt):
+Needs CUDA (benchmarks require a GPU). All commands below run on the GPU box
+with the project venv:
 
-| Version | Tag | p50 latency | p50 RTF | Throughput |
-|---|---|---:|---:|---:|
-| Official baseline | Official `qwen-tts` | 91.722 s | 0.896 | 1.116× |
-| v1 | Explicit prefill/decode | 71.382 s | 0.698 | 1.433× |
-| v2 | Reduced Python/CPU sync overhead | 67.974 s | 0.664 | 1.505× |
-| **v3** | **Static cache + torch-compiled predictor pass** | **57.477 s** | **0.562** | **1.780×** |
-| v4 | CUDA graphs for predictor loop + talker pass | 64.431 s | 0.630 | 1.588× |
-| **v5** | **Torch-compiled predictor loop + talker graph** | **48.106 s** | **0.470** | **2.127×** |
-| v5.1 | Explicit-mask talker graph | 64.188 s | 0.627 | 1.594× |
-| v6 *(invalid)* | Compiled explicit-mask talker | 56.577 s | 0.553 | 1.808× |
-| **v7 *(exact)*** | **Predictor + talker FFN eager CUDA graphs** | **56.858 s** | **0.556** | **1.800×** |
+```bash
+cd whistle2   # synced copy on the gpu box
+PYTHONPATH=src .venv/bin/python ...   # or: uv run --no-sync python ...
+```
 
-Every version emits 1,279 complete codec frames, or 102.320 seconds of audio.
-Lower latency and RTF are better. Measurements use an RTX 3050 6 GB Laptop GPU
-with PyTorch 2.13.0, CUDA 13.0, bfloat16, and SDPA. V2 reduces latency by 4.78%
-from v1. V3 reduces latency by another 15.44%, or 37.33% from the retained
-official baseline. V3's modular profile shows 40.46% lower predictor latency
-than v1, partly offset by 31.18% higher talker-step latency. V4 is deterministic
-but regresses 12.10% from v3 because it replays an uncompiled predictor loop
-and retains full-capacity static-cache talker attention. V5 compiles the full
-predictor loop instead of explicitly graph-capturing it, reducing p50 latency
-by 25.33% from v4 and 47.55% from official.
-V5.1 restores an explicit talker mask and regresses 33.43% from v5; the
-fully warmed modular profile shows the talker graph rising 84.18%.
-V7 replaces numerically divergent compilation with exact eager-kernel CUDA
-graphs: one graph per residual-predictor codebook position and one graph for
-each talker layer's fixed-shape residual FFN. It is 38.01% faster than official
-and only 0.50% slower than the invalid V6 result.
+## Synthesize
 
-Correctness status: V5 and V6 are performance diagnostics with invalid codec
-output. V7 passed an independent full-sequence validation against a reference
-generated before its graph wrappers were installed: all 20,480 codec IDs and
-2,457,600 waveform samples matched exactly.
+```bash
+PYTHONPATH=src .venv/bin/python infer.py "The quick brown fox jumps over the lazy dog." \
+    --speaker Ryan --out out/whistle.wav
+# options: --max-frames (default 1280), --language, --checkpoint, --device, --dtype
+```
 
-## Head-to-head vs `faster-qwen3-tts`
+## Benchmark: V7 vs official latency (simple one-liners)
 
-Same GPU, identical protocol (RTX 3050 6 GB Laptop GPU, 0.6B CustomVoice,
-alicia input, greedy decode, repetition penalty 1.2, fixed 1,279 frames):
+The canonical comparison runs **both sides at natural EOS** (the official API
+stops at the codec EOS regardless of budget, so fixed-token budgets are not
+parity-comparable). Both produce the same 1,216-frame / 97.3 s alicia output:
 
-| Engine | p50 wall | RTF | Throughput | Parity |
-|---|---:|---:|---:|---|
-| `faster-qwen3-tts` 0.3.2 | 66.6 s | 0.651 | 1.54× | not bit-exact |
-| **whistle v7** | **56.9 s** | **0.556** | **1.80×** | exact |
+V7 (this repo) with timing JSON, waveform, and exactness gate:
 
-Whistle is ~14.5% faster than `faster-qwen3-tts` on identical hardware while
-also holding exact codec-ID + waveform parity. The gap comes from keeping the
-talker's growing-KV attention on the cheap dynamic-cache path (their static
-full-capacity talker attends over padding and was measured ~28% slower) plus a
-leaner on-device hot loop (preallocated buffers, no per-step list/stack/clone).
+```bash
+PYTHONPATH=src .venv/bin/python profile_tts.py --text-file alicia.txt --backend split \
+    --max-new-tokens 1280 --iterations 3 --warmup 1 --speaker Ryan \
+    --check-codec-parity --out out/v7_alicia.wav --json-out benchmarks/v7_latest.json
+```
 
-`docs/qwen3_tts_official_vs_faster.md` analyzes the two implementations in
-detail.
+Official `qwen-tts` runtime for the comparison (same protocol):
 
-See [results.md](results.md) for the benchmark method, command, individual
-runs, and phase breakdown. See [report.md](report.md) for a concise optimization
-history and the talker-cache A/B findings. For the complete codebase map and
-an in-depth explanation of every optimization with diagrams, see
-[docs/technical_deep_dive.md](docs/technical_deep_dive.md).
+```bash
+PYTHONPATH=src .venv/bin/python profile_tts.py --text-file alicia.txt --backend official \
+    --max-new-tokens 1280 --iterations 3 --warmup 1 --speaker Ryan \
+    --json-out benchmarks/official_latest.json
+```
+
+`--check-codec-parity` runs the official API once more and requires every
+codec ID and waveform sample to match exactly; with `--fixed-tokens` (a
+1,280-frame budget, 102.4 s audio) the parity check is skipped because the
+official side always stops at EOS. Reported numbers are p50 over the measured
+runs; without `--fixed-tokens` generation stops at the natural EOS.
+
+## Optional quality bench: Qwen3-ASR WER
+
+Transcribes any synthesized WAV with Qwen3-ASR-0.6B and reports WER/CER
+against the source text (needs the `qwen_asr` package; the vendored upstream
+copy at `dante/baseline` on the gpu box works with transformers < 5.13):
+
+```bash
+PYTHONPATH=/path/to/dante/baseline /path/to/dante/.venv/bin/python eval_asr_wer.py \
+    --wav out/v7_alicia.wav --ref-file alicia.txt --json-out results/wer_v7.json
+```
+
+## Headline numbers (RTX 3050 6 GB Laptop GPU, PyTorch 2.13/CUDA 13, bf16, SDPA, Ryan)
+
+Measured 2026-08-21 on the same protocol (alicia, natural EOS, 1,216 frames /
+97.28 s audio, one warmup + one measured run):
+
+| Path | wall | RTF | xrt | parity | WER (Qwen3-ASR-0.6B) |
+|---|---:|---:|---:|---:|---:|
+| Official `qwen-tts` | 82.91 s | 0.852 | 1.173× | — | — |
+| **V7 (this repo)** | **54.08 s** | **0.556** | **1.799×** | **exact (19,456 IDs, 2,334,720 samples)** | **3.02%** |
+
+V7 is 34.8% faster wall-to-wall on identical audio (1.53× faster per audio
+second by RTF). At the historical fixed 1,279-frame budget the numbers are
+56.7 s / 0.554 / 1.800×.
+
+## Layout
+
+- `src/whistle/inference.py` — `tts_infer`: prompt build, prefill, V7 decode
+  loop with chunked EOS, codec decode.
+- `src/whistle/graphs.py` — `PrefixStaticLayer`, `PredictorGraphs`,
+  `DecoderFfnGraph`, `OfficialTalker`, `decode_graphs`.
+- `src/whistle/streaming.py`, `server.py` — chunked streaming + FastAPI server.
+- `profile_tts.py` — benchmark harness (split vs official, parity, JSON).
+- `infer.py` — single-shot synthesis CLI.
+- `eval_asr_wer.py` — optional Qwen3-ASR WER/CER eval.
+- `sandbox/` — the experimental lab (frame/dual graphs, Triton fusion,
+  sampling) that produced and then rejected the non-V7 ideas.

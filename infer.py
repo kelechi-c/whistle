@@ -17,7 +17,7 @@ CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 @click.command()
 @click.argument("text")
 @click.option("--checkpoint", default=CHECKPOINT, show_default=True)
-@click.option("--speaker", default="serena", show_default=True)
+@click.option("--speaker", default="Ryan", show_default=True)
 @click.option("--language", default="english", show_default=True)
 @click.option("--max-frames", type=click.IntRange(min=1), default=RUNTIME.max_frames)
 @click.option("--device", "device_choice", type=click.Choice(["auto", "cpu", "cuda"]), default=RUNTIME.device)

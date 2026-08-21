@@ -80,7 +80,7 @@ def stream_tts(
     if prefill_length + max_new_tokens - 1 > MAX_CACHE_LEN:
         raise ValueError("prompt and frames exceed the fixed talker cache capacity")
 
-    graphs = decode_graphs(talker, MAX_CACHE_LEN, "predictor-ffn-graphs")
+    graphs = decode_graphs(talker, MAX_CACHE_LEN)
     graphs.talker.reset(prefill_length)
     talker.rope_deltas = None
 

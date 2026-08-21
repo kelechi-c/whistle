@@ -8,7 +8,7 @@ unchanged while decode state and completed outputs stay on-device.
 import time
 import torch
 from qwen_tts import Qwen3TTSModel
-from whistle.graphs import TalkerMode, decode_graphs
+from whistle.graphs import decode_graphs
 from transformers.generation.logits_process import (
     LogitsProcessorList,
     RepetitionPenaltyLogitsProcessor,
@@ -145,10 +145,9 @@ def tts_infer(
     tts: Qwen3TTSModel,
     text: str,
     *,
-    speaker: str = "serena",
+    speaker: str = "ryan",
     language: str = "english",
     max_new_tokens: int = 1_280,
-    talker_mode: TalkerMode = "predictor-ffn-graphs",
     stop_at_eos: bool = True,
     repetition_penalty: float = 1.2,
 ) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
@@ -182,7 +181,7 @@ def tts_infer(
     )
     if prefill_length + max_new_tokens - 1 > MAX_CACHE_LEN:
         raise ValueError("prompt and frames exceed the fixed talker cache capacity")
-    graphs = decode_graphs(talker, MAX_CACHE_LEN, talker_mode)
+    graphs = decode_graphs(talker, MAX_CACHE_LEN)
     graphs.talker.reset(prefill_length)
     talker.rope_deltas = None
     if phase_events is not None:
@@ -248,53 +247,6 @@ def tts_infer(
     frame_count = 0
 
     for frame_index in range(max_new_tokens):
-        if talker_mode == "official-eager":
-            cache_position = torch.tensor(
-                [prefill_length + frame_index], device=device, dtype=torch.long
-            )
-            step_attention_mask = torch.ones(
-                (1, prefill_length + frame_index + 1),
-                device=device,
-                dtype=torch.long,
-            )
-            talker_output = talker(
-                input_ids=token.view(1, 1),
-                attention_mask=step_attention_mask,
-                past_key_values=graphs.talker.cache,
-                past_hidden=past_hidden,
-                trailing_text_hidden=tts_pad,
-                tts_pad_embed=tts_pad,
-                generation_step=frame_index,
-                subtalker_dosample=False,
-                cache_position=cache_position,
-                output_hidden_states=True,
-                use_cache=True,
-                return_dict=True,
-            )
-            frame_codes = talker_output.hidden_states[-1]
-            codes[frame_index].copy_(frame_codes[0])
-            primary_history[:, frame_index].copy_(token)
-            frame_count = frame_index + 1
-            hit = _maybe_eos_row(
-                codes,
-                frame_count,
-                eos_token_id,
-                stop_at_eos=stop_at_eos,
-                final=frame_count == max_new_tokens,
-            )
-            if hit is not None:
-                frame_count = hit
-                break
-            past_hidden = talker_output.past_hidden
-            token = _select_token(
-                talker_output.logits,
-                primary_history[:, :frame_count],
-                eos_token_id=eos_token_id,
-                processors=processors,
-                allow_eos=stop_at_eos,
-            )
-            continue
-
         last_id_hidden = codec_embeddings(token.view(1, 1))
         predictor_input[:, :1].copy_(past_hidden)
         predictor_input[:, 1:].copy_(last_id_hidden)

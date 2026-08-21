@@ -14,7 +14,6 @@ import soundfile as sf
 import torch
 
 from whistle.config import RUNTIME
-from whistle.graphs import TalkerMode
 from whistle.inference import tts_infer
 
 Backend = Literal["split", "official"]
@@ -74,7 +73,6 @@ def _load_split(
     language: str,
     speaker: str,
     max_new_tokens: int,
-    talker_mode: TalkerMode,
     repetition_penalty: float,
     fixed_tokens: bool,
 ) -> tuple[Generate, torch.device, float, Any]:
@@ -88,7 +86,6 @@ def _load_split(
             language=language,
             speaker=speaker,
             max_new_tokens=max_new_tokens,
-            talker_mode=talker_mode,
             repetition_penalty=repetition_penalty,
             stop_at_eos=not fixed_tokens,
         )
@@ -277,18 +274,10 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option(
     "--backend", type=click.Choice(["split", "official"]), default="split"
 )
-@click.option(
-    "--talker-mode",
-    type=click.Choice(
-        ["official-eager", "predictor-ffn-graphs"]
-    ),
-    default="predictor-ffn-graphs",
-    show_default=True,
-)
 @click.option("--check-codec-parity", is_flag=True)
 @click.option("--model", default=None, help="official qwen model id or path")
 @click.option("--lang", default="english")
-@click.option("--speaker", default="serena", show_default=True)
+@click.option("--speaker", default="Ryan", show_default=True)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=1_280)
 @click.option("--repetition-penalty", type=click.FloatRange(min=0.001), default=1.2)
 @click.option(
@@ -305,7 +294,6 @@ def main(
     text: str,
     text_file: pl.Path | None,
     backend: Backend,
-    talker_mode: TalkerMode,
     check_codec_parity: bool,
     model: str | None,
     lang: str,
@@ -330,7 +318,6 @@ def main(
             lang,
             speaker,
             max_new_tokens,
-            talker_mode,
             repetition_penalty,
             fixed_tokens,
         )
@@ -386,7 +373,6 @@ def main(
     if json_out is not None:
         payload = {
             "backend": backend,
-            "talker_mode": talker_mode if backend == "split" else None,
             "codec_parity_checked": check_codec_parity,
             "repetition_penalty": repetition_penalty,
             "fixed_tokens": fixed_tokens,
