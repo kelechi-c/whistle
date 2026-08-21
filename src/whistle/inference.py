@@ -6,18 +6,38 @@ unchanged while decode state and completed outputs stay on-device.
 """
 
 import time
-
-from qwen_tts import Qwen3TTSModel
 import torch
+from qwen_tts import Qwen3TTSModel
+from whistle.graphs import TalkerMode, decode_graphs
 from transformers.generation.logits_process import (
     LogitsProcessorList,
     RepetitionPenaltyLogitsProcessor,
     SuppressTokensLogitsProcessor,
 )
 
-from whistle.graphs import TalkerMode, decode_graphs
 
 MAX_CACHE_LEN = 2_048
+EOS_CHECK_EVERY = 8
+
+
+def _maybe_eos_row(
+    codes: torch.Tensor,
+    upto: int,
+    eos_token_id: int,
+    *,
+    stop_at_eos: bool,
+    final: bool,
+) -> int | None:
+    """Returns the first EOS frame index below ``upto``, at the check cadence.
+
+    Replaces the per-frame ``token.eq(eos).item()`` host sync with a device
+    scan every ``EOS_CHECK_EVERY`` frames (plus the final frame), so the GPU
+    never drains per frame and the emitted trim stays identical.
+    """
+    if not stop_at_eos or (upto % EOS_CHECK_EVERY != 0 and not final):
+        return None
+    hit = (codes[:upto, 0] == eos_token_id).nonzero()
+    return int(hit[0, 0]) if hit.numel() else None
 
 
 def _select_token(
@@ -228,8 +248,6 @@ def tts_infer(
     frame_count = 0
 
     for frame_index in range(max_new_tokens):
-        if stop_at_eos and token.eq(eos_token_id).item():
-            break
         if talker_mode == "official-eager":
             cache_position = torch.tensor(
                 [prefill_length + frame_index], device=device, dtype=torch.long
@@ -257,6 +275,16 @@ def tts_infer(
             codes[frame_index].copy_(frame_codes[0])
             primary_history[:, frame_index].copy_(token)
             frame_count = frame_index + 1
+            hit = _maybe_eos_row(
+                codes,
+                frame_count,
+                eos_token_id,
+                stop_at_eos=stop_at_eos,
+                final=frame_count == max_new_tokens,
+            )
+            if hit is not None:
+                frame_count = hit
+                break
             past_hidden = talker_output.past_hidden
             token = _select_token(
                 talker_output.logits,
@@ -275,6 +303,16 @@ def tts_infer(
         codes[frame_index, 1:].copy_(residual_codes[0])
         primary_history[:, frame_index].copy_(token)
         frame_count = frame_index + 1
+        hit = _maybe_eos_row(
+            codes,
+            frame_count,
+            eos_token_id,
+            stop_at_eos=stop_at_eos,
+            final=frame_count == max_new_tokens,
+        )
+        if hit is not None:
+            frame_count = hit
+            break
         if frame_index + 1 == max_new_tokens:
             break
 
