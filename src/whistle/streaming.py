@@ -58,7 +58,7 @@ def stream_tts(
     tts: Qwen3TTSModel,
     text: str,
     *,
-    speaker: str = "serena",
+    speaker: str = "ryan",
     language: str = "english",
     max_new_tokens: int = 1_280,
     chunk_size: int = 12,
