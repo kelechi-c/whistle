@@ -29,7 +29,6 @@ nero/
 .ruff_cache/
 .stfolder/
 .stignore
-*.wavresults/
 out/
 blog_drafts.md
 draft.md
