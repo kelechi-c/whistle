@@ -9,7 +9,8 @@ stays the working jotter; the deep dive is the reference for the article.
 `tts_infer` is the batch-one greedy CustomVoice path. It accepts an already
 loaded official `Qwen3TTSModel`, so checkpoint loading is outside inference
 measurements. Its default `official-eager` mode is the correctness reference;
-the compiled/static modes remain selectable experiments.
+the compiled/static modes remain selecta
+ble experiments.
 
 ```
 official processor + prompt embeddings

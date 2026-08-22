@@ -1,0 +1,36 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+refs
+logs.md
+.python-version
+AGENTS.md
+.gitignore
+stash
+docs/*
+!docs/*.md
+logs.txt
+lt-report.md
+qwen3tts.md
+handoff/
+sandbox/
+benchmarks/
+docs/
+stash/
+nero/
+.pi/
+.ruff_cache/
+.stfolder/
+.stignore
+*.wavresults/
+out/
+blog_drafts.md
+draft.md
+reminder.md
