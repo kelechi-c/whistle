@@ -19,7 +19,7 @@ PYTHONPATH=src .venv/bin/python ...   # or: uv run --no-sync python ...
 
 ```bash
 PYTHONPATH=src .venv/bin/python infer.py "The quick brown fox jumps over the lazy dog." \
-    --speaker Ryan --out out/whistle.wav
+    --speaker ryan --out out/whistle.wav
 # options: --max-frames (default 1280), --language, --checkpoint, --device, --dtype
 ```
 
@@ -33,7 +33,7 @@ V7 (this repo) with timing JSON, waveform, and exactness gate:
 
 ```bash
 PYTHONPATH=src .venv/bin/python profile_tts.py --text-file alicia.txt --backend split \
-    --max-new-tokens 1280 --iterations 3 --warmup 1 --speaker Ryan \
+    --max-new-tokens 1280 --iterations 3 --warmup 1 --speaker ryan \
     --check-codec-parity --out out/v7_alicia.wav --json-out benchmarks/v7_latest.json
 ```
 
@@ -41,7 +41,7 @@ Official `qwen-tts` runtime for the comparison (same protocol):
 
 ```bash
 PYTHONPATH=src .venv/bin/python profile_tts.py --text-file alicia.txt --backend official \
-    --max-new-tokens 1280 --iterations 3 --warmup 1 --speaker Ryan \
+    --max-new-tokens 1280 --iterations 3 --warmup 1 --speaker ryan \
     --json-out benchmarks/official_latest.json
 ```
 

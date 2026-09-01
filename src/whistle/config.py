@@ -6,6 +6,11 @@ from typing import Literal
 
 import torch
 
+CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+SPEAKER = "ryan"
+LANGUAGE = "english"
+MAX_CACHE_LEN = 2_048
+
 DeviceChoice = Literal["auto", "cpu", "cuda"]
 DTypeChoice = Literal["float32", "float16", "bfloat16"]
 
@@ -14,7 +19,7 @@ DTypeChoice = Literal["float32", "float16", "bfloat16"]
 class RuntimeConfig:
     """Holds every mutable runtime choice outside model checkpoint structure."""
 
-    checkpoint: pl.Path = pl.Path("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+    checkpoint: pl.Path = pl.Path(CHECKPOINT)
     output: pl.Path = pl.Path("whistle.wav")
     device: DeviceChoice = "auto"
     dtype: DTypeChoice = "bfloat16"

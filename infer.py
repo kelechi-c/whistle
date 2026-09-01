@@ -11,13 +11,11 @@ import torch
 from whistle.config import DTypeChoice, DeviceChoice, RUNTIME
 from whistle.inference import tts_infer
 
-CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
-
 
 @click.command()
 @click.argument("text")
-@click.option("--checkpoint", default=CHECKPOINT, show_default=True)
-@click.option("--speaker", default="Ryan", show_default=True)
+@click.option("--checkpoint", default=str(RUNTIME.checkpoint), show_default=True)
+@click.option("--speaker", default="ryan", show_default=True)
 @click.option("--language", default="english", show_default=True)
 @click.option("--max-frames", type=click.IntRange(min=1), default=RUNTIME.max_frames)
 @click.option("--device", "device_choice", type=click.Choice(["auto", "cpu", "cuda"]), default=RUNTIME.device)

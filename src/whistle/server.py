@@ -11,8 +11,8 @@ Test:
     curl -N 'http://127.0.0.1:8000/synthesize?text=Hello%20world' -o stream.wav
 """
 
-import io
 import struct
+import threading
 from typing import Generator
 
 import click
@@ -22,13 +22,15 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from qwen_tts import Qwen3TTSModel
 
+from whistle.config import CHECKPOINT, LANGUAGE, SPEAKER
 from whistle.streaming import stream_tts
-
-CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 
 app = FastAPI(title="whistle-tts", docs_url=None, redoc_url=None)
 _model: Qwen3TTSModel | None = None
 _sample_rate = 24_000
+# Decoding mutates shared per-model state (rope deltas, graph input buffers),
+# so concurrent requests must not interleave; they queue here instead.
+_generate_lock = threading.Lock()
 
 
 def get_model() -> Qwen3TTSModel:
@@ -62,12 +64,13 @@ def _wav_chunks(
 ) -> Generator[bytes, None, None]:
     """Yields WAV header + int16 PCM chunks as they are decoded."""
     tts = get_model()
-    yield _wav_header(_sample_rate)
-    for chunk in stream_tts(
-        tts, text, speaker=speaker, language=language, chunk_size=chunk_size
-    ):
-        pcm = (chunk["audio"].float().cpu().numpy() * 32767.0).astype("<i2").tobytes()
-        yield pcm
+    with _generate_lock:
+        yield _wav_header(_sample_rate)
+        for chunk in stream_tts(
+            tts, text, speaker=speaker, language=language, chunk_size=chunk_size
+        ):
+            pcm = (chunk["audio"].float().cpu().numpy() * 32767.0).astype("<i2").tobytes()
+            yield pcm
 
 
 @app.get("/health")
@@ -79,8 +82,8 @@ def health() -> dict[str, object]:
 @app.get("/synthesize")
 def synthesize(
     text: str,
-    speaker: str = "serena",
-    language: str = "english",
+    speaker: str = SPEAKER,
+    language: str = LANGUAGE,
     chunk_size: int = 12,
 ) -> StreamingResponse:
     """Streams synthesized speech as audio/wav, chunk by chunk."""
@@ -98,7 +101,6 @@ def main(host: str, port: int) -> None:
     """Warms the model, then serves the streaming TTS API."""
     get_model()
     uvicorn.run(app, host=host, port=port, log_level="warning")
-
 
 if __name__ == "__main__":
     main()

@@ -14,15 +14,14 @@ import pathlib as pl
 import torch
 from qwen_tts import Qwen3TTSModel
 
+from whistle.config import CHECKPOINT, SPEAKER
 from whistle.streaming import stream_tts
-
-CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 
 
 @click.command()
 @click.option("--text-file", type=click.Path(path_type=pl.Path, exists=True), default=None)
 @click.option("--text", default=None, help="inline text (positional alternative)")
-@click.option("--speaker", default="ryan", show_default=True)
+@click.option("--speaker", default=SPEAKER, show_default=True)
 @click.option("--chunk-size", type=click.IntRange(min=1), default=12, show_default=True)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=1_280)
 def main(text_file: pl.Path | None, text: str | None, speaker: str, chunk_size: int, max_new_tokens: int) -> None:
@@ -38,12 +37,17 @@ def main(text_file: pl.Path | None, text: str | None, speaker: str, chunk_size: 
     ttft = None
     chunk_times = []
     frames = 0
+    ch = None
     for ch in stream_tts(model, payload, speaker=speaker, chunk_size=chunk_size, max_new_tokens=max_new_tokens):
         if ttft is None:
             ttft = ch["ttft_ms"]
         chunk_times.append(ch["chunk_ms"])
         audio_ms = ch["cumulative_ms"]
         frames += ch["chunk_frames"]
+
+    if ch is None:
+        print("no chunks were yielded (empty generation)")
+        return
 
     peak = torch.cuda.max_memory_allocated() / 1024**2
     print(

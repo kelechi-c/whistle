@@ -561,3 +561,73 @@ neither cheaply.
 The standing rule survives again: no latency claim enters the headline table
 without full codec-token + waveform validation, and no approximate kernel is
 worth a headline number that the predictor's argmaxes will quietly invalidate.
+
+## 12. Postscript (2026-08-29): the landscape, Track A, and the kernel question
+
+(Sections 9-11 of the web version; full maps in `docs/literature_landscape.md`
+and `docs/kernel_plan.md`.)
+
+### The landscape
+
+The Qwen3-TTS tech report (arXiv 2601.15621) anchors the field: official
+vLLM serving reports 97 ms first-packet / RTF 0.288 for the 0.6B 12 Hz model
+on datacenter hardware. nari-labs (Dia team) published the serving SOTA —
+sub-50 ms p95 TTFA at 10 RPS on one H100 — and three of their six headline
+techniques are ones this project found independently: the predictor's whole
+15-step loop as one CUDA graph, the deferred EOS check, incremental
+state-cached codec decoding. Megakernel servers (qwen-tts-turbo, 4 ms TTFP on
+a 5090) disable their talker megakernel in production and fall back to a
+CUDA-graph talker. The local-runtime tier (faster-qwen3-tts + GGML, Triton
+fusion projects, C++/GGUF ports) validates with WER only — none maintains
+bit-exactness. Speculative decoding for speech tokens (SSD 1.4x, VADUSA ~3x,
+Apple's PCG: exact sampling over acoustic similarity groups) is the
+algorithmic frontier, all outside the parity contract. Whistle's niche —
+parity-exact, consumer GPU — is uncontested; the remaining frontier is
+scheduler-level (multi-request) and kernel-level work.
+
+### Track A (promoted to src/whistle, gates green)
+
+- **TTFA**: ramped chunk boundaries (2, 4, 8, then steady 12) + first-chunk
+  RMS leading-silence trim + incremental transposed-buffer fill. TTFA
+  507 -> 97 ms (short), 509 -> 100 ms (medium), 146 ms (alicia); cadence and
+  emitted codes unchanged; stream WER CER 0.82% == batch canonical.
+- **Sampled graphs**: a second lazily captured 15-graph predictor set per
+  (temperature, top_k); PyTorch's CUDA RNG advances philox offsets per
+  replay, so multinomial draws are fresh each frame. Sampled fixed-1280:
+  78.4 s (eager fallback, +38%) -> 58.7 s (+3.2% vs greedy); peak +8 MB.
+- **Codec overlap**: the official decode IS chunked(300, 25) and the codec
+  transformer is fully causal (`sliding_window: None`), so any other cadence
+  deviates bitwise by construction. Implemented behind a flag anyway; on the
+  3050 it is a net LOSS (64.3 s vs 56.9 s — SM contention exceeds the 1.8 s
+  hidden codec). Flag kept for bigger GPUs; negative result documented.
+- **KV-prefix caching**: skipped by analysis (fixed prefix = 8-9 of 20-200+
+  prompt tokens; ceiling ~10-50 ms).
+
+### Stage 0: the kernel question, answered without kernels
+
+PyTorch-only instrument: fp32-compute swap on Linear scopes + fresh eps*randn
+noise on all 247 decode linears, wrapped before graph capture; the zero-drift
+head control stayed bit-identical for 1,216 frames. Calibration: the fp32
+swap flips 40-50% of output elements by one bf16 ULP (o_proj max abs 2.0e-3).
+
+| run | frames | first divergence | tail RMS | verdict |
+|---|---|---|---|---|
+| baseline | 1216 | ref | -34.4 dB | healthy |
+| drift head (control) | 1216 | identical | -34.4 dB | harness clean |
+| drift attention | 1280 | 3 | -68.3 dB | COLLAPSE |
+| drift FFN | 1229 | 3 | -30.7 dB | healthy |
+| drift talker+predictor | 1280 | 1 | -56.7 dB | COLLAPSE |
+| noise 1e-4 | 1280 | 5 | -60.5 dB | COLLAPSE |
+| noise 1e-3 | 1144 | 3 | -35.0 dB | healthy |
+| noise 1e-2 | 1280 | 0 | -94.0 dB | total collapse |
+
+Findings: any ULP-level drift diverges greedy within 1-5 frames (bit-exact
+kernels are impossible, full stop); collapse into the silence attractor is
+STOCHASTIC, not monotone in drift size (~half of drifted trajectories fall
+in; noise 1e-4 collapsed while 1e-3 survived) — there is no safe drift
+threshold. Verdict: RED for greedy kernels. A whistle-v2 kernel path is
+sampled-only (no deterministic attractor; the checkpoint's own default), with
+a measured ceiling of ~1.5-1.75x on this GPU (the predictor re-reads its
+weights 15x per frame; sequential dependency makes that traffic compulsory).
+By project direction everything stays PyTorch for now; `docs/kernel_plan.md`
+holds the scoped roadmap.

@@ -6,6 +6,21 @@ Each chunk is decoded to audio incrementally with the official 25-frame left
 context (``decoder(codes[..., start-ctx:end])`` + context trim), so the first
 audio chunk is available long before the utterance finishes.
 
+Track A latency work: chunk boundaries follow a ramp schedule — the first
+``ramp_frames`` (default 2) frames ship immediately, subsequent chunks grow
+stepwise up to the steady-state ``chunk_size`` — cutting TTFA roughly by
+ramp[0] frames of decode time while later chunks keep playback headroom. The
+first chunk optionally drops leading silence below an RMS threshold (the
+nari-style dynamic trim; streaming audio already deviates bitwise from the
+official chunked(300, 25) decode at its own boundaries, so this only widens
+an existing, inaudible class of deviation). The transposed codec buffer is
+filled incrementally instead of re-copied per chunk.
+
+EOS handling matches ``inference.tts_infer``: no per-frame host sync. The
+chunked device scan runs at every ``EOS_CHECK_EVERY`` frames, at every chunk
+boundary (forced so a chunk never contains stale EOS frames), and at the final
+frame; the trim semantics are identical to the batch path.
+
 Yields dicts::
 
     {"codes": [chunk, 16] int64, "audio": [1, samples] float32,
@@ -21,18 +36,40 @@ from typing import Any, Generator
 import click
 import torch
 from qwen_tts import Qwen3TTSModel
-from transformers.generation.logits_process import (
-    LogitsProcessorList,
-    RepetitionPenaltyLogitsProcessor,
-    SuppressTokensLogitsProcessor,
+
+from whistle.config import CHECKPOINT, LANGUAGE, SPEAKER
+from whistle.inference import (
+    _maybe_eos_row,
+    _prefill,
+    _prepare,
+    _select_token,
 )
 
-from whistle.graphs import decode_graphs
-from whistle.inference import _select_token, build_prompt
-
-MAX_CACHE_LEN = 2_048
-CHECKPOINT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 Chunk = dict[str, Any]
+
+
+def _trim_leading_silence(
+    audio: torch.Tensor,
+    sample_rate: int,
+    threshold: float = 0.002,
+    lead_ms: float = 20.0,
+) -> torch.Tensor:
+    """Drops samples before the first 10 ms RMS window above ``threshold``.
+
+    Keeps a short lead-in (default 20 ms) so the first phoneme is not clipped;
+    quiet audio below the threshold passes through untouched. One tiny host
+    sync per request, applied only to the first chunk.
+    """
+    if audio.shape[-1] == 0:
+        return audio
+    window = max(1, sample_rate // 100)
+    rms = audio.unfold(-1, window, window).pow(2).mean(-1).sqrt()
+    loud = (rms > threshold).nonzero()
+    if loud.numel() == 0:
+        return audio
+    onset = int(loud[0, -1]) * window
+    lead = min(onset, int(sample_rate * lead_ms / 1000))
+    return audio[..., onset - lead:]
 
 
 def _streaming_decoder(speech_model: torch.nn.Module, left_context: int):
@@ -42,6 +79,7 @@ def _streaming_decoder(speech_model: torch.nn.Module, left_context: int):
     decoded_frames = 0
 
     def decode_next(codes_transposed: torch.Tensor) -> torch.Tensor:
+        """Decodes codes[..., start-ctx:end] and trims the context warmup samples."""
         nonlocal decoded_frames
         start = decoded_frames
         end = codes_transposed.shape[-1]
@@ -58,156 +96,147 @@ def stream_tts(
     tts: Qwen3TTSModel,
     text: str,
     *,
-    speaker: str = "ryan",
-    language: str = "english",
+    speaker: str = SPEAKER,
+    language: str = LANGUAGE,
     max_new_tokens: int = 1_280,
     chunk_size: int = 12,
+    ramp_frames: tuple[int, ...] = (2, 4, 8),
+    trim_leading_silence: bool = True,
     left_context: int = 25,
     repetition_penalty: float = 1.2,
+    temperature: float | None = None,
+    top_k: int = 50,
     stop_at_eos: bool = True,
 ) -> Generator[Chunk, None, None]:
-    """Streams V7 decode: one yield per ``chunk_size`` frames with audio."""
+    """Streams V7 decode with ramped chunk boundaries and incremental audio.
+
+    Boundaries fire at ``ramp_frames`` counts first, then every ``chunk_size``
+    frames; ``ramp_frames=()`` restores the fixed-cadence behavior.
+    """
     model = tts.model
     talker = model.talker
-    predictor = talker.code_predictor
-    talker_config = model.config.talker_config
     device = next(model.parameters()).device
+    sampling = (
+        {"temperature": temperature, "top_k": top_k} if temperature is not None else None
+    )
 
     started = time.perf_counter()
-    talker_input, attention_mask, tts_pad, prefill_length, codec_embeddings = build_prompt(
-        tts, text, language=language, speaker=speaker, device=device
+    prompt = _prepare(
+        tts, text, speaker=speaker, language=language, device=device, max_new_tokens=max_new_tokens
     )
-    if prefill_length + max_new_tokens - 1 > MAX_CACHE_LEN:
-        raise ValueError("prompt and frames exceed the fixed talker cache capacity")
-
-    graphs = decode_graphs(talker, MAX_CACHE_LEN)
-    graphs.talker.reset(prefill_length)
-    talker.rope_deltas = None
-
-    talker_output = talker(
-        inputs_embeds=talker_input,
-        attention_mask=attention_mask,
-        past_key_values=graphs.talker.cache,
-        past_hidden=None,
-        trailing_text_hidden=tts_pad,
-        tts_pad_embed=tts_pad,
-        generation_step=None,
-        use_cache=True,
-        return_dict=True,
-    )
-    eos_token_id = talker_config.codec_eos_token_id
-    suppress_from = talker_config.vocab_size - 1_024
-    suppress_tokens = [
-        token_id
-        for token_id in range(suppress_from, talker_config.vocab_size)
-        if token_id != eos_token_id
-    ]
-    processors = LogitsProcessorList()
-    if repetition_penalty != 1.0:
-        processors.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
-    processors.append(SuppressTokensLogitsProcessor(suppress_tokens, device=device))
-    primary_history = torch.empty((1, max_new_tokens), device=device, dtype=torch.long)
-    token = _select_token(
-        talker_output.logits,
-        primary_history[:, :0],
-        eos_token_id=eos_token_id,
-        processors=processors,
-        allow_eos=stop_at_eos,
-    )
-    past_hidden = talker_output.past_hidden
-    graphs.talker.set_rope_deltas(talker.rope_deltas)
-    torch.cuda.synchronize(device)
+    first = _prefill(tts, prompt, repetition_penalty=repetition_penalty, stop_at_eos=stop_at_eos)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
     ttft_ms = (time.perf_counter() - started) * 1000
 
-    num_code_groups = talker_config.num_code_groups
-    codes = torch.empty((max_new_tokens, num_code_groups), device=device, dtype=torch.long)
+    codes = torch.empty((max_new_tokens, first.num_code_groups), device=device, dtype=torch.long)
     codes_transposed = torch.empty(
-        (1, num_code_groups, max_new_tokens), device=device, dtype=torch.long
+        (1, first.num_code_groups, max_new_tokens), device=device, dtype=torch.long
     )
     predictor_input = torch.empty(
-        (1, 2, talker_config.hidden_size), device=device, dtype=past_hidden.dtype
+        (1, 2, first.hidden_size), device=device, dtype=first.past_hidden.dtype
     )
-    residual_embeddings = tuple(predictor.get_input_embeddings())
     speech_model = model.speech_tokenizer.model
     decode_next = _streaming_decoder(speech_model, left_context)
     sample_rate = int(speech_model.get_output_sample_rate())
 
+    token = first.token
+    past_hidden = first.past_hidden
     frame_count = 0
-    chunk_start = time.perf_counter()
+    chunk_start_frame = 0
+    chunk_started = time.perf_counter()
+    schedule = list(ramp_frames)
+    next_boundary = schedule.pop(0) if schedule else chunk_size
+    emitted = 0
+
+    def chunk_dict(final: bool, now: float) -> Chunk:
+        """Assembles one yield, trims first-chunk silence, resets the cadence clock."""
+        nonlocal chunk_start_frame, chunk_started, emitted
+        audio = decode_next(codes_transposed[..., :frame_count])
+        if emitted == 0 and trim_leading_silence:
+            audio = _trim_leading_silence(audio, sample_rate)
+        emitted += 1
+        payload = {
+            "codes": codes[chunk_start_frame:frame_count].clone(),
+            "audio": audio,
+            "sample_rate": sample_rate,
+            "chunk_frames": frame_count - chunk_start_frame,
+            "ttft_ms": ttft_ms,
+            "cumulative_ms": (now - started) * 1000,
+            "chunk_ms": (now - chunk_started) * 1000,
+            "final": final,
+        }
+        chunk_start_frame = frame_count
+        chunk_started = now
+        return payload
 
     for frame_index in range(max_new_tokens):
-        if stop_at_eos and token.eq(eos_token_id).item():
-            break
-        last_id_hidden = codec_embeddings(token.view(1, 1))
+        last_id_hidden = prompt.codec_embeddings(token.view(1, 1))
         predictor_input[:, :1].copy_(past_hidden)
         predictor_input[:, 1:].copy_(last_id_hidden)
-        residual_codes = graphs.predictor.run(predictor_input)
+        residual_codes = prompt.graphs.predictor.run(predictor_input, sampling=sampling)
         codes[frame_index, 0].copy_(token[0])
         codes[frame_index, 1:].copy_(residual_codes[0])
-        primary_history[:, frame_index].copy_(token)
+        prompt.primary_history[:, frame_index].copy_(token)
         frame_count = frame_index + 1
+        boundary = frame_count == next_boundary
+        if boundary:
+            next_boundary = schedule.pop(0) if schedule else next_boundary + chunk_size
         is_last = frame_index + 1 == max_new_tokens
-
-        if not is_last:
+        hit = _maybe_eos_row(
+            codes,
+            frame_count,
+            first.eos_token_id,
+            stop_at_eos=stop_at_eos,
+            force=boundary or is_last,
+        )
+        if hit is not None:
+            frame_count = hit
+            is_last = True
+        elif not is_last:
             codec_hiddens = torch.cat(
                 [last_id_hidden]
                 + [
                     embedding(residual_codes[:, index : index + 1])
-                    for index, embedding in enumerate(residual_embeddings)
+                    for index, embedding in enumerate(first.residual_embeddings)
                 ],
                 dim=1,
             )
-            talker_input = codec_hiddens.sum(dim=1, keepdim=True) + tts_pad
-            past_hidden = graphs.talker.run(talker_input, prefill_length + frame_index)
+            talker_input = codec_hiddens.sum(dim=1, keepdim=True) + prompt.tts_pad
+            past_hidden = prompt.graphs.talker.run(talker_input, prompt.prefill_length + frame_index)
             token = _select_token(
                 talker.codec_head(past_hidden),
-                primary_history[:, :frame_count],
-                eos_token_id=eos_token_id,
-                processors=processors,
+                prompt.primary_history[:, :frame_count],
+                eos_token_id=first.eos_token_id,
+                processors=first.processors,
                 allow_eos=stop_at_eos,
+                sampling=sampling,
             )
 
-        if frame_count % chunk_size == 0:
-            codes_transposed[..., :frame_count].copy_(codes[:frame_count].t().unsqueeze(0))
+        if not (is_last or boundary):
+            continue
+        if frame_count > chunk_start_frame:
+            codes_transposed[..., chunk_start_frame:frame_count].copy_(
+                codes[chunk_start_frame:frame_count].t().unsqueeze(0)
+            )
             now = time.perf_counter()
-            yield {
-                "codes": codes[frame_count - chunk_size : frame_count].clone(),
-                "audio": decode_next(codes_transposed[..., :frame_count]),
-                "sample_rate": sample_rate,
-                "chunk_frames": chunk_size,
-                "ttft_ms": ttft_ms,
-                "cumulative_ms": (now - started) * 1000,
-                "chunk_ms": (now - chunk_start) * 1000,
-                "final": is_last,
-            }
-            chunk_start = now
-            if is_last:
-                break
-
-    remainder = frame_count % chunk_size
-    if remainder and frame_count:
-        codes_transposed[..., :frame_count].copy_(codes[:frame_count].t().unsqueeze(0))
-        now = time.perf_counter()
-        yield {
-            "codes": codes[frame_count - remainder : frame_count].clone(),
-            "audio": decode_next(codes_transposed[..., :frame_count]),
-            "sample_rate": sample_rate,
-            "chunk_frames": remainder,
-            "ttft_ms": ttft_ms,
-            "cumulative_ms": (now - started) * 1000,
-            "chunk_ms": (now - chunk_start) * 1000,
-            "final": True,
-        }
+            yield chunk_dict(is_last, now)
+        if is_last:
+            break
 
 
 @click.command()
 @click.argument("text")
 @click.option("--checkpoint", default=CHECKPOINT, show_default=True)
-@click.option("--speaker", default="serena", show_default=True)
-@click.option("--language", default="english", show_default=True)
+@click.option("--speaker", default=SPEAKER, show_default=True)
+@click.option("--language", default=LANGUAGE, show_default=True)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=1_280)
 @click.option("--chunk-size", type=click.IntRange(min=1), default=12, show_default=True)
+@click.option("--ramp", default="2,4,8", show_default=True, help="comma frame counts for the first chunks (empty string disables)")
+@click.option("--no-trim", is_flag=True, help="keep leading silence in the first chunk")
 @click.option("--left-context", type=click.IntRange(min=0), default=25, show_default=True)
+@click.option("--temperature", type=click.FloatRange(min=0.01), default=None, help="enable do_sample with this temperature")
+@click.option("--top-k", type=click.IntRange(min=1), default=50, show_default=True)
 def main(
     text: str,
     checkpoint: str,
@@ -215,9 +244,14 @@ def main(
     language: str,
     max_new_tokens: int,
     chunk_size: int,
+    ramp: str,
+    no_trim: bool,
     left_context: int,
+    temperature: float | None,
+    top_k: int,
 ) -> None:
     """Streams TEXT and prints per-chunk latency milestones."""
+    ramp_frames = tuple(int(part) for part in ramp.split(",") if part.strip())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tts = Qwen3TTSModel.from_pretrained(
         checkpoint,
@@ -228,6 +262,7 @@ def main(
     list(
         stream_tts(
             tts, "warmup.", max_new_tokens=chunk_size + 2, chunk_size=chunk_size,
+            ramp_frames=ramp_frames, trim_leading_silence=not no_trim,
             left_context=left_context, stop_at_eos=False,
         )
     )
@@ -235,7 +270,8 @@ def main(
     for index, chunk in enumerate(
         stream_tts(tts, text, speaker=speaker, language=language,
                    max_new_tokens=max_new_tokens, chunk_size=chunk_size,
-                   left_context=left_context)
+                   ramp_frames=ramp_frames, trim_leading_silence=not no_trim,
+                   left_context=left_context, temperature=temperature, top_k=top_k)
     ):
         audio_samples = chunk["audio"].shape[-1]
         print(

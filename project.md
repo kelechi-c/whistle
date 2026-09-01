@@ -4,13 +4,31 @@
 benchmark contract, and every optimization (V1–V7) with diagrams. This file
 stays the working jotter; the deep dive is the reference for the article.
 
+## shared runtime choices (src/whistle/config.py)
+
+`config.py` is the single source for the checkpoint id (`CHECKPOINT`), the
+canonical speaker/language defaults (`SPEAKER="ryan"`, `LANGUAGE="english"`),
+and `MAX_CACHE_LEN=2048`. All entry points (infer, profile_tts, streaming,
+server, bench_streaming) import these instead of restating them; speaker
+defaults are lowercase `ryan` everywhere (serena voice measured 38.8% WER vs
+3% for ryan — reproducibility depends on this). `RuntimeConfig.checkpoint`
+builds from the same constant.
+
 ## src/whistle/inference.py - official-module latency path
 
 `tts_infer` is the batch-one greedy CustomVoice path. It accepts an already
 loaded official `Qwen3TTSModel`, so checkpoint loading is outside inference
-measurements. Its default `official-eager` mode is the correctness reference;
-the compiled/static modes remain selecta
-ble experiments.
+measurements.
+
+Prompt building and prefill are shared with the streaming path through two
+frozen dataclasses: `_prepare` (build_prompt + capacity check + decode-graphs
+reset, returns `Prompt`) and `_prefill` (prefill forward + processors + first
+token, returns `Prefill`). The batch loop (`tts_infer`) and the streaming loop
+(`streaming.stream_tts`) consume these, so the two paths cannot drift.
+`_maybe_eos_row` is the shared chunked-EOS scan (`EOS_CHECK_EVERY=8`): it takes
+`force=` instead of `final=` — callers must force a scan whenever `codes`
+becomes observable (streaming chunk boundaries force it; the batch path only
+forces on the final frame).
 
 ```
 official processor + prompt embeddings
@@ -60,7 +78,10 @@ mask-free static-cache path remains excluded.
 `decode_graphs` caches both objects per loaded talker. The predictor embedding
 weights are stacked once for experimental static modes. Variable-length
 prefill stays eager. `DecodeGraphs` is the boundary that later optimized blocks
-can replace only after they pass exact parity.
+can replace only after they pass exact parity. `DecoderFfnGraph.forward`
+handles only the decode shape (seq len 1, graph captured) and delegates every
+other shape to the official layer; attention output is taken positionally
+(`[0]`) since attentions/hidden states are never requested.
 
 The codec calls the official tokenizer model's `decode` implementation and
 does not duplicate its chunking. CUDA events separate preparation, prefill,
@@ -138,3 +159,57 @@ The standalone `mini_qwen3` LLM package moved from `hoot/` to
 triton kernel surgery lab whose kernels will eventually port back into
 Whistle's talker FFN and residual predictor.
 
+## src/whistle/streaming.py + server.py - streaming path
+
+`stream_tts` reuses `_prepare`/`_prefill`/`_maybe_eos_row` from inference.py —
+same V7 graphs, same EOS trim semantics, but yields every `chunk_size` frames.
+EOS scans are forced at each chunk boundary so a yielded chunk can never
+contain stale EOS frames; between boundaries the scan stays on the 8-frame
+cadence (no per-frame host sync). Incremental codec decoding keeps a 25-frame
+left context and trims its warmup samples per chunk. An EOS hit trims
+`frame_count` back to the EOS index; a chunk is yielded only if it still
+contains frames, and the loop breaks with `final=True`.
+
+`server.py` serializes generation behind a module-level `threading.Lock`
+(`_generate_lock`): decode mutates shared per-model state (rope deltas, graph
+input buffers, talker cache), so concurrent requests would interleave writes
+into the same CUDA graph buffers. Requests queue on the lock; one GPU serves
+one synthesis at a time.
+
+
+## Track A (2026-08-29, sandbox/track_a — verified on victoria)
+
+`docs/literature_landscape.md` maps the field (nari-labs serving SOTA, M*,
+megakernels, speech spec-decoding). Track A implements the parity-safe wins:
+
+- **streaming.py**: `ramp_frames=(2,4,8)` chunk-boundary schedule (first
+  chunks ship small, later chunks grow to steady `chunk_size`) + RMS
+  leading-silence trim on the first chunk + incremental transposed-buffer
+  fill. TTFA 507→97 ms (short), 509→100 ms (medium), 146 ms (alicia); cadence
+  and emitted codes unchanged; WER CER 0.82% = batch canonical.
+- **graphs.py**: `sample_token` + lazily captured second 15-graph predictor
+  set per `(temperature, top_k)`; RNG-in-graph gives fresh draws per replay.
+  Sampled fixed-1280: 78.4 s → 58.7 s (overhead vs greedy +38% → +3.2%).
+- **inference.py**: `temperature`/`top_k` threading; `overlap_codec` flag
+  (side-stream incremental codec) — measured NET LOSS on the 3050 (SM
+  contention > 1.8 s hidden codec); codec transformer is full-causal with
+  `sliding_window=None`, so any cadence ≠ official chunked(300,25) deviates
+  bitwise. Flag stays default-off, negative result documented.
+- KV-prefix caching skipped by analysis (fixed prefix = 8-9 of 20-200+
+  prompt tokens; ceiling ~10-50 ms, not worth split-prefill risk).
+- Gates all green: parity32 + alicia natural-EOS exact, alicia regression
+  rtf 0.555, unit test pass. Battery: `sandbox/track_a/results/battery.log`.
+- **Promoted 2026-08-29** to `src/whistle` (graphs/inference/streaming +
+  profile CLI --temperature/--top-k/--overlap-codec) and re-verified on
+  victoria: parity32 + alicia natural-EOS exact, sampled-graphs spot +4%,
+  TTFA 103.9 ms on the main path (run_promo_check.sh).
+- Stage 0 (pytorch-only numerics probe, `sandbox/stage0/`): ULP-level drift
+  diverges greedy within frames; collapse into the silence attractor is
+  stochastic (~half of trials), not thresholded. Verdict RED for greedy
+  kernels; v2 kernel = sampled-only edition (see `docs/kernel_plan.md`).
+
+`docs/kernel_plan.md` drafts the V8 persistent-kernel path (Track B): memory
+arithmetic puts the honest 3050 ceiling at ~1.5-1.75× (predictor re-reads its
+weights 15×/frame — sequential dependency makes that traffic compulsory);
+Stage 0 sensitivity probe (correct fp32-accum GEMV, is 1e-3 drift stable over
+102 s greedy?) decides feasibility before any kernel engineering.

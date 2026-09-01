@@ -75,8 +75,11 @@ def _load_split(
     max_new_tokens: int,
     repetition_penalty: float,
     fixed_tokens: bool,
+    temperature: float | None,
+    top_k: int,
+    overlap_codec: bool,
 ) -> tuple[Generate, torch.device, float, Any]:
-    """Loads the official model for the explicit greedy prefill/decode path."""
+    """Loads the official model for the explicit prefill/decode path."""
     model, device, load_seconds = _load_model(checkpoint or DEFAULT_MODEL)
 
     def generate() -> Sample:
@@ -88,6 +91,9 @@ def _load_split(
             max_new_tokens=max_new_tokens,
             repetition_penalty=repetition_penalty,
             stop_at_eos=not fixed_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            overlap_codec=overlap_codec,
         )
         phases = {name: timings[name] for name in ("prepare", "prefill", "decode", "codec")}
         return Sample(waveform[0], sample_rate, phases, codec_ids)
@@ -277,9 +283,15 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option("--check-codec-parity", is_flag=True)
 @click.option("--model", default=None, help="official qwen model id or path")
 @click.option("--lang", default="english")
-@click.option("--speaker", default="Ryan", show_default=True)
+@click.option("--speaker", default="ryan", show_default=True)
 @click.option("--max-new-tokens", type=click.IntRange(min=2), default=1_280)
 @click.option("--repetition-penalty", type=click.FloatRange(min=0.001), default=1.2)
+@click.option("--temperature", type=click.FloatRange(min=0.01), default=None,
+              help="enable do_sample with this temperature (top_k below)")
+@click.option("--top-k", type=click.IntRange(min=1), default=50, show_default=True)
+@click.option("--overlap-codec/--no-overlap-codec", default=False,
+              help="decode finished frames on a side stream during the loop "
+                   "(net loss on small GPUs; for A/B on bigger GPUs)")
 @click.option(
     "--fixed-tokens",
     is_flag=True,
@@ -300,6 +312,9 @@ def main(
     speaker: str,
     max_new_tokens: int,
     repetition_penalty: float,
+    temperature: float | None,
+    top_k: int,
+    overlap_codec: bool,
     fixed_tokens: bool,
     iterations: int,
     warmup: int,
@@ -320,6 +335,9 @@ def main(
             max_new_tokens,
             repetition_penalty,
             fixed_tokens,
+            temperature,
+            top_k,
+            overlap_codec,
         )
     else:
         loaded = _load_official(
@@ -402,6 +420,10 @@ def main(
         if backend != "split" or sample.codec_ids is None:
             raise click.ClickException(
                 "codec parity checking requires the split backend"
+            )
+        if temperature is not None:
+            raise click.ClickException(
+                "codec parity checking is greedy-only; drop --temperature"
             )
         print("running untimed official codec id parity check")
         with torch.inference_mode():
