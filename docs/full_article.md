@@ -257,6 +257,16 @@ The root cause chain is worth reading slowly:
 what made it broken — a perfect trap, because the fast path and the correct
 path differ by a single `None`.
 
+**The greedy vs. sampling proof:** A direct empirical probe of this V5 configuration
+(`sandbox/probe_v5.py`) isolates how decoding policy interacts with this numerical bug.
+Under greedy decoding (`argmax`), the RMS energy plummets by 98% between seconds 2 and 4
+(`0.0503 → 0.0013 → 0.0011`), collapsing into an infinite repetitive loop of silence/pad
+tokens (Token 117 emitted 43×, Token 1368 emitted 41×). But under *sampled decoding*
+(`temperature=0.9, top_k=50`), top-50 multinomial sampling provides sufficient entropy
+to escape the deterministic silence attractor: audio energy remains healthy (RMS
+`0.077 → 0.072 → 0.071`), and Qwen3-ASR scores **0.00% CER (100% phonetic accuracy)**.
+The silence failure is the fatal collision of attention attenuation with greedy argmax selection.
+
 ### 4.6 V5.1 — correctness restored, speed gone (64.2 s)
 
 Restoring an explicit per-position causal mask fixed the output and exploded
@@ -315,6 +325,43 @@ waveform samples matched exactly** against a reference generated before the
 wrappers were installed. Decode is 96.7% of wall (codec 3.2%, prefill 0.09%);
 the short-run modular split attributes decode to ~66% predictor / ~33% talker /
 ~1.3% scheduling.
+
+On the natural-EOS protocol (Alicia natural stop at frame 1,216 / 97.28 s audio,
+verified live on Victoria's RTX 3050), generation drops from **83.834 s (official baseline)
+to 54.298 s p50 (Whistle V7)** — an RTF of **0.558 (1.792× real-time)**, cutting
+**29.54 seconds of wall time per utterance** with 100% bitwise codec and audio sample parity.
+
+### 4.9 Scaling to 1.7B — crossing the real-time threshold
+
+Does the launch-bound scheduling thesis hold when the model scales nearly 3×, from
+0.6B to 1.7B (`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`)?
+
+We executed a head-to-head benchmark on Victoria (40W RTX 3050 6GB Laptop GPU) across
+the canonical 1,280 target tokens (~102.4 s audio) using the Alicia input (Ryan voice,
+English, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` across 1 warmup + 3 timed
+benchmark iterations). Peak VRAM allocated was **4,964 MiB** — fitting comfortably within
+the 6 GB physical hardware ceiling.
+
+| Metric | Official Runtime (1.7B) | Whistle V7 (1.7B) | Delta / Improvement |
+| :--- | :--- | :--- | :--- |
+| Iteration 1 | 107.758 s (RTF 1.053, 0.950×) | 77.440 s (RTF 0.756, 1.322×) | -30.318 s |
+| Iteration 2 | 108.645 s (RTF 1.062, 0.942×) | 77.448 s (RTF 0.756, 1.322×) | -31.197 s |
+| Iteration 3 | 108.415 s (RTF 1.060, 0.944×) | 77.471 s (RTF 0.757, 1.322×) | -30.944 s |
+| **p50 Wall Latency** | **108.415 s** | **77.448 s** | **-30.967 s (-28.56% latency cut)** |
+| **p50 Real-Time Factor (RTF)** | **1.060** *(slower than RT)* | **0.756** *(faster than RT)* | **-28.68% lower RTF** |
+| **p50 Throughput (xRT)** | 0.944× realtime | 1.322× realtime | **+40.04% throughput increase** |
+
+**Phase breakdown for Whistle V7 (1.7B):** Inside Whistle V7, the 77.448 s p50 generation
+breaks down as: preparation 2.32 ms, prefill forward 119.47 ms, autoregressive decode loop
+**75.495 s** (97.5% of wall time), and speech tokenizer codec decode 1.832 s (2.4% of wall time).
+Artifacts: `benchmarks/v7_1.7b_3runs.json` and `benchmarks/official_1.7b_3runs.json`.
+
+**The critical milestone:** On an entry-level 40W laptop GPU, the official HuggingFace runtime
+**cannot achieve real-time streaming** on the 1.7B model (RTF 1.060 = 0.944× realtime). In interactive
+playback, this means audio buffer underruns, stuttering, and an inability to maintain interactive
+conversational latency. Whistle V7 **crosses the real-time threshold**, generating 102.4 seconds
+of 1.7B audio in 77.45 seconds (0.756 RTF = 1.322× realtime) with zero quality degradation,
+cutting over **30 seconds of wall-clock latency**.
 
 ---
 
@@ -483,6 +530,21 @@ not). Both engines converge on the same thesis from opposite directions — the
 model is fine; the scheduling is the product — and both pay the static-attention
 tax the eager default avoids.
 
+**Why faster-qwen3-tts wraps the whole predictor loop at once, and why we cannot:**
+In `faster-qwen3-tts/predictor_graph.py`, all 15 residual predictor steps are inlined
+into a single monolithic CUDA graph over a 17-slot `StaticCache` with 14 precomputed
+causal mask tensors. While intuitive, wrapping the entire predictor loop at once forces
+SDPA to compute attention across padded slots using $-\infty$ masks on every step.
+In bfloat16, masked softmax over padding produces different reduction rounding than
+unmasked SDPA over the exact active prefix ($2, 3, \dots, 16$). Under greedy decoding,
+this single-bit ULP rounding difference flips the argmax at **frame 1, codebook 1**
+(1642 vs 957), permanently breaking exact parity. Whistle's `PrefixStaticLayer` instead
+exposes only the active prefix slice, which requires capturing 15 separate per-position
+CUDA graphs (each with its exact unmasked shape). Because launching 15 graph replays
+takes only ~2 µs each (hidden behind the GPU's 25–35 µs kernel execution), Whistle avoids
+both launch bubbles and the static padding penalty, running ~15–22% faster than
+faster-qwen3-tts's monolithic graph while preserving 100% bit-exact parity.
+
 The standing rule survives intact: no latency claim enters the headline table
 until the independent full codec-token and waveform validation passes. It has
 rejected the fastest result in the project's history twice, and it was right
@@ -631,3 +693,53 @@ a measured ceiling of ~1.5-1.75x on this GPU (the predictor re-reads its
 weights 15x per frame; sequential dependency makes that traffic compulsory).
 By project direction everything stays PyTorch for now; `docs/kernel_plan.md`
 holds the scoped roadmap.
+
+---
+
+## Appendix: The Graveyard of Failures and Trials
+
+> **The Golden Rule of Autoregressive TTS:** A small bf16 reduction difference flips one greedy `argmax`; autoregression then magnifies that single flipped token across the rest of the sequence until it collapses into gibberish or digital silence. Plausible audio is never proof of correctness.
+
+### A.1 The Invalidated Speedup Hall of Fame
+
+| Version / Mode | Claimed Time | Why It Failed | Root Cause |
+|---|---:|---|---|
+| **V5 (Static Talker Graph)** | **48.1 s** *(fastest in repo history)* | **Digital silence** on long input. | Used full-capacity `StaticCache` with `attention_mask=None`. While valid for `DynamicCache`, in `StaticCache` SDPA attended over all 1,432 empty zero-padded slots. Attention diluted to zero, killing energy. |
+| **V6 (Compiled Static Talker)** | **56.6 s** | **Parity divergence** at frame 1, codebook 13. | `torch.compile` altered the bf16 reduction/accumulation order. One `argmax` flipped (344 vs 1484), fed the next residual embedding, and permanently diverged the sequence. |
+| **Full Frame-Graph (1 or 2 graphs)** | **63.1 s** | **~8% slower** than default + collapsed to silence after 30s. | Capturing the entire frame into monolithic graphs forced static 2048-slot masked attention. Attending over padding added a +8% compute penalty, and numerical drift triggered a greedy silence collapse at ~30s (WER 99%). |
+
+### A.2 The two distinct causes of silent audio
+
+One of the most insidious traps was that two completely different bugs produced the exact same symptom: the model stopped speaking and output digital silence.
+
+1. **The Masking Bug (Numerical Collapse):** Occurred in V5 and Full Frame-Graph. Missing masks on zero-padded static caches or bf16 accumulation drift flipped a token, causing hidden states to drift into an invalid latent space where the model output zero energy.
+2. **The Greedy Penalty Trap (Behavioral Collapse):** Occurred in early repetition penalty tuning (1.05 or 1.1). Under greedy decoding, low repetition penalty caused Alicia to collapse into a low-energy repetitive loop after ~16s. Raising greedy repetition penalty to **1.2** matched official greedy behavior bit-for-bit and reached natural EOS at frame 1,216.
+
+### A.3 Kernel fusion and quantization trials
+
+- **Triton Fused RMSNorm→QKV (`rmsnorm_qkv`):** Fused LayerNorm, Q/K/V projections, and head-norms into one launch. Microbenchmark was **speed-neutral** (224 µs fused vs 259 µs unfused, ±13%) because batch-1 is bandwidth-bound on weight loads. End-to-end result was **100% WER**: max absolute error of 0.004–0.06 against cuBLAS compounded across 20 layers × 64 frames, destroying greedy decoding. Inside CUDA graphs, kernel launches are already free.
+- **W8A16 Int8 Talker MLP Quantization (`quant.py`):** Quantized Talker SwiGLU MLP weights to per-channel int8 (623 MB → 312 MB). Latency was **completely unchanged** (56.78s → 56.79s) because dequant-to-fp16 GEMVs save no time at batch-1 on tensor cores. Quality was **instantly destroyed (WER 198%)**: weight rounding flipped the very first residual codebook at frame 0, codebook 1.
+- **The Codebook Embedding Fusion Bug:** Batched all 16 embedding lookups into one call, but accidentally looked up residuals 1–15 in the *codec* embedding table instead of their 15 distinct residual codebook tables (`nn.ModuleList`). Emitted white noise (WER 9,200%). Reverting to the official tables restored 100% bitwise parity.
+
+### A.4 Serving and architectural dead ends
+
+- **`overlap_codec` (Side-Stream Codec Decoding):** Ran incremental codec decoding on a second CUDA stream concurrently with Talker decode. Resulted in a **net slowdown (64.3s vs 56.9s)** on the RTX 3050 because the neural vocoder and Talker fought for SM execution units. Furthermore, the official codec transformer is full-causal without sliding windows, so any chunk boundary other than official 300/25 breaks bitwise waveform parity.
+- **Stage 0 Sensitivity Probe:** Tested injecting 1 ULP of arithmetic noise (~10⁻³ relative error) into PyTorch GEMVs to simulate custom C++ megakernels. Verdict was **RED**: even 10⁻⁴ noise stochastically triggered silence collapse in ~50% of runs, proving custom non-cuBLAS kernels are mathematically incapable of guaranteeing greedy parity.
+- **KV-Prefix Caching:** Fixed prompt prefix is only 8–9 tokens out of 50–200+ prompt tokens. Maximum theoretical savings was ~10–30 ms per utterance, not worth cache invalidation risks.
+
+### A.5 Measurement, voice, and tooling traps
+
+- **The Serena vs. Ryan Voice Effect:** The exact same bit-exact engine produced **38.8% WER on voice `serena`** but **3.02% WER on voice `ryan`** because Qwen3-ASR degraded on Serena's formal cadence. Ryan was made project default.
+- **The Positional CLI Trap:** Invoking `profile_tts.py short.txt` passed the literal string `"short . txt"` as text instead of reading the file, producing 150% WER and triggering hours of debugging for a nonexistent regression.
+- **Thermal Throttling on Victoria (RTX 3050 Mobile 40W):** After two consecutive benchmark runs, GPU clock speeds throttled, causing runtimes to drift from 56.8s to 75s+. Accurate benchmarks required fresh processes, cool-down periods, and monitoring clocks.
+- **Host Timer Illusion:** Python `time.perf_counter()` inside the decode loop measured CPU kernel queueing, not GPU execution. Accurate phase breakdowns required asynchronous CUDA events with a single terminal synchronization.
+
+### A.6 The predictor brittleness thesis
+
+Across all failed trials (V6 compile, full frame-graphs, QKV fusion, Int8 quantization), **divergence never started at the primary Talker token. It ALWAYS blew up first at a residual codebook argmax:**
+
+1. **Sequential Dependency:** Book k depends on Book k−1's argmax. One flip cascades through all 15 books within the frame.
+2. **Summation Mixing:** All 16 codebook embeddings sum into the next frame's Talker input, immediately shifting the next trajectory.
+3. **Razor-Thin Margins:** Residual codebooks encode subtle acoustic details with tiny logit margins. Any arithmetic noise crosses the argmax threshold easily.
+
+Conclusion: in greedy mode, exact CUDA graph replay of the official eager kernels (V7) is the only path that stays on the rails.

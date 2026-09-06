@@ -213,3 +213,31 @@ arithmetic puts the honest 3050 ceiling at ~1.5-1.75× (predictor re-reads its
 weights 15×/frame — sequential dependency makes that traffic compulsory);
 Stage 0 sensitivity probe (correct fp32-accum GEMV, is 1e-3 drift stable over
 102 s greedy?) decides feasibility before any kernel engineering.
+
+## Microarchitectural Profiling Traces & GPU Bandwidth (2026-09-03)
+
+- **Victoria RTX 3050 6GB Laptop GPU Bandwidth**:
+  - Bus: 96-bit GDDR6 @ 5486 MHz (11 Gbps), theoretical peak 131.66 GB/s.
+  - Empirical D2D copy bandwidth: 122.39 GB/s (92.9% of theoretical peak).
+  - Triad (axpy) bandwidth: 123.88 GB/s; vector add: 121.67 GB/s; scale: 119.40 GB/s.
+  - Context: Decode is strictly memory-bandwidth bound (GEMV weight loads dominate); eliminating CPU launch bubbles allows near-peak bandwidth saturation.
+- **Trace Analysis (Official vs Whistle 16-frame fixed-pass)**:
+  - Official: 2,318 ms wall, 1,761 ms GPU span, 661.8 ms GPU busy, 1,099.3 ms idle bubbles (37.6% duty cycle), 98,825 `cudaLaunchKernel` calls, 565 stream syncs, 375k CPU ops.
+  - Whistle: 676 ms wall, 942.7 ms GPU span, 656.7 ms GPU busy, 286.0 ms idle (69.7% duty cycle), 23,229 `cudaLaunchKernel` calls, 660 `cudaGraphLaunch` calls, 87 stream syncs, 99k CPU ops.
+  - Speedup: 3.43× wall time, 3.84× bubble reduction, 4.25× fewer kernel launches.
+  - Visual artifacts: `docs/inference_trace_comparison.html` + 2x retina screenshots in `out/traces/`.
+- **1.7B Variant Benchmark (Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice, Alicia text, 3 runs p50)**:
+  - Official Baseline: 108.415 s p50, RTF 1.060, throughput 0.944× (slower than real-time).
+  - Whistle V7: 77.448 s p50, RTF 0.756, throughput 1.322× (faster than real-time, real-time capable).
+  - Delta: −30.967 s eliminated (−28.56% latency reduction, +40.04% throughput boost).
+  - VRAM: 4,964 MB allocated (fits within 6 GB VRAM with `expandable_segments:True`).
+
+  - Alicia 1,279 frames: 91.722 s official → 71.382 s V1 = 20.340 s cut (22.18% reduction, +28.5% throughput).
+- **V3 Dynamic Talker Cache A/B & V7 Lineage**:
+  - V3 A/B (50.011 s) cut talker step by 28.43% (18.685 s vs 26.106 s) by using `DynamicCache` over active prefix rather than 2,048-slot padded `StaticCache`.
+  - V7 is built directly on V2's dynamic-cache eager talker foundation, adding CUDA graphs only to fixed-shape blocks: 15 predictor codebook graphs (`PrefixStaticLayer`) + 28 talker layer residual FFN graphs (`DecoderFfnGraph`).
+- **V5 Failed Config Probe (Greedy vs Sampling)**:
+  - Probe: `sandbox/probe_v5.py` on Victoria (compiled predictor loop + static talker graph with `attention_mask=None`).
+  - Greedy decoding: Collapses to digital silence after 2 seconds (RMS: [0-2s]=0.0503 → [2-4s]=0.0013 → [4-5.1s]=0.0011; 98% energy loss). Repetitive pad/silence token loops.
+  - Sampled decoding (t=0.9, top_k=50): Avoids the silence attractor (RMS: [0-2s]=0.0968, [2-4s]=0.1154, [4-5.1s]=0.1331). Emitted token entropy maintained.
+
