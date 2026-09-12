@@ -10,6 +10,9 @@ dependencies = [
     "soundfile>=0.14.0",
 ]
 
+[project.scripts]
+whistle = "whistle.cli:main"
+
 [project.optional-dependencies]
 server = [
     "fastapi>=0.115",
@@ -22,3 +25,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["whistle", "whistle.*"]

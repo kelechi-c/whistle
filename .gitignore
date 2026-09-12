@@ -1,42 +1,41 @@
-# Python-generated files
+# python, build, and environments
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+*.py[cod]
+*.egg-info/
+/.venv*/
+/.ruff_cache/
+/.pytest_cache/
+/.cache/
+/build/
+/dist/
+/wheels/
 
-# Virtual environments
-.venv
-refs
-logs.md
-.python-version
-AGENTS.md
-.gitignore
-stash
-docs/*
-!docs/*.md
-logs.txt
-lt-report.md
-qwen3tts.md
-handoff/
-sandbox/
-benchmarks/
-docs/
-stash/
-nero/
-.pi/
-.ruff_cache/
-.stfolder/
-.stignore
-out/
-blog_drafts.md
-draft.md
-reminder.md
-results/
-out/
-blog_drafts.md
-draft.md
-reminder.md
-*.wav
-.commandcode/
+# local research, vendor copies, and experimental scratch
+/local/
+/refs/
+/stash/
+/sandbox/
+/nero/
+/benchmarks/
+/results/
+/out/
+/article/
+/articles/
+/whistle-test.wav
+
+# generated trace pages
+docs/*.html
+
+# machine state, credentials, and agent records
+/.commandcode/
+/.pi/
+/.modal/
+/.stfolder/
+/.stignore
+/handoff/
+/AGENTS.md
+/logs.md
+/logs.txt
+/.env
+/.env.*
+!/.env.example

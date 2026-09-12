@@ -255,39 +255,6 @@ def build_prompt(
     return talker_input, attention_mask, tts_pad, talker_input.shape[1], codec_embeddings
 
 
-CODEC_LEFT_CONTEXT = 25
-
-
-def _flush_codec(
-    codes: torch.Tensor,
-    decoder: torch.nn.Module,
-    upsample: int,
-    parts: list[torch.Tensor],
-    state: dict[str, int],
-    side_stream: torch.cuda.Stream,
-    end: int,
-) -> None:
-    """Decodes frames [state['flushed']:end] on the side stream with left context.
-
-    Replicates the official ``chunked_decode`` inner loop (25-frame left
-    context, front-trimmed output) but at an arbitrary flush cadence so codec
-    work overlaps the ongoing talker decode. Events keep the codes writes and
-    the side-stream reads ordered without host syncs.
-    """
-    start = state["flushed"]
-    if end <= start:
-        return
-    context = min(CODEC_LEFT_CONTEXT, start)
-    ready = torch.cuda.Event()
-    ready.record()
-    side_stream.wait_event(ready)
-    with torch.cuda.stream(side_stream):
-        chunk = codes[start - context : end].t().unsqueeze(0).contiguous()
-        wav = decoder(chunk)
-        parts.append(wav[..., context * upsample :])
-    state["flushed"] = end
-
-
 @torch.inference_mode()
 def tts_infer(
     tts: Qwen3TTSModel,
@@ -300,7 +267,6 @@ def tts_infer(
     repetition_penalty: float = 1.2,
     temperature: float | None = None,
     top_k: int = 50,
-    overlap_codec: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, int, dict[str, float]]:
     """Runs batch-one CustomVoice inference through explicit forward passes.
 
@@ -310,12 +276,8 @@ def tts_infer(
     the caller explicitly transfers the completed outputs.
 
     ``temperature`` enables official-style do_sample decoding (top-k + softmax
-    + multinomial); the predictor runs its captured sampled graph set. When
-    ``overlap_codec`` is set (CUDA only), completed frames are decoded
-    incrementally on a side stream during the decode loop. That deviates from
-    the official chunked(300, 25) decode at chunk boundaries, so the waveform
-    is no longer bitwise-identical to the official full decode (codec tokens
-    are unchanged); greedy default keeps the exact-parity contract.
+    + multinomial); the predictor runs its captured sampled graph set. Audio
+    is decoded after token generation using the official batch codec decoder.
     """
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be positive")
@@ -367,13 +329,6 @@ def tts_infer(
     frame_count = 0
 
     speech_model = tts.model.speech_tokenizer.model
-    overlap = overlap_codec and cuda_timing
-    if overlap:
-        side_stream = torch.cuda.Stream(device=device)
-        wav_parts: list[torch.Tensor] = []
-        flush_state = {"flushed": 0}
-        codec_decoder = speech_model.decoder
-        upsample = int(codec_decoder.total_upsample)
 
     for frame_index in range(max_new_tokens):
         last_id_hidden = prompt.codec_embeddings(token.view(1, 1))
@@ -415,8 +370,6 @@ def tts_infer(
             allow_eos=stop_at_eos,
             sampling=sampling,
         )
-        if overlap and frame_count % EOS_CHECK_EVERY == 0:
-            _flush_codec(codes, codec_decoder, upsample, wav_parts, flush_state, side_stream, frame_count)
 
     if phase_events is not None:
         phase_events[3].record()
@@ -428,11 +381,7 @@ def tts_infer(
 
     # === codec: official decoder implementation, kept on-device ===
     codes = codes[:frame_count]
-    if frame_count and overlap:
-        _flush_codec(codes, codec_decoder, upsample, wav_parts, flush_state, side_stream, frame_count)
-        torch.cuda.current_stream(device).wait_stream(side_stream)
-        waveform = torch.cat(wav_parts, dim=-1)[0]
-    elif frame_count:
+    if frame_count:
         decoded = speech_model.decode(codes.unsqueeze(0), return_dict=False)[0]
         waveform = decoded[0].unsqueeze(0)
     else:

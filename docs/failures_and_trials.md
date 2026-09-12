@@ -151,7 +151,7 @@ a correctness gate.
 
 ### D — WER/ASR eval (new infrastructure)
 
-- `eval_asr_wer.py` transcribes TTS output with Qwen3-ASR-0.6B and reports
+- `tools/eval_asr_wer.py` transcribes TTS output with Qwen3-ASR-0.6B and reports
   WER/CER. **Config trap:** transformers < 5.13 ships no `Qwen3ASR*` classes;
   the eval imports dante's vendored `qwen_asr` package
   (`PYTHONPATH=.../dante/baseline`) and runs in dante's venv (has `nagisa`).
@@ -254,9 +254,9 @@ this metric on Qwen3-ASR-0.6B (serena's formal read degrades systematically —
 e.g. "autoregressive"→"auto regressive" even on the 10-word sample). Default
 speaker moved to `ryan` project-wide; the benchmark contract already used Ryan.
 
-**Harness lesson that briefly produced a false "regression":** `profile_tts.py`
+**Harness lesson that briefly produced a false "regression":** `tools/profile_tts.py`
 takes the positional argument as the *text to synthesize*, not a file —
-invoking `profile_tts.py short.txt` synthesizes the literal string "short . txt"
+invoking `tools/profile_tts.py short.txt` synthesizes the literal string "short . txt"
 (garbage in → garbage out, 100–150% WER). Use `--text-file`. This misuse
 looked exactly like a code regression until the official API bisect proved
 the pipeline clean (main split == official bitwise; sandbox == official with
@@ -286,7 +286,7 @@ Official latency on the new texts (same protocol): story1 31.82 s / RTF 0.725,
 story2 84.91 s / RTF 0.887 → **V7 speedup holds outside alicia: 1.34× and
 1.60×**; RTF stayed 0.54–0.56 across every text — no speed regression.
 
-Streaming (`bench_streaming.py`, chunk_size 12): TTFA 0.87–0.96 s across
+Streaming (`tools/bench_streaming.py`, chunk_size 12): TTFA 0.87–0.96 s across
 short→story1; median chunk decode 540–562 ms per 1 s of audio = **1.71–1.78×
 realtime**; peak ~2.2 GB. Streaming default speaker was still "serena" after
 the Ryan default change — fixed during this pass.

@@ -1,0 +1,10 @@
+include README.md pyproject.toml
+recursive-include src/whistle *.py
+prune docs
+prune evidence
+prune local
+prune tests
+prune tools
+prune src/whistle.egg-info
+global-exclude *.py[cod]
+global-exclude .DS_Store

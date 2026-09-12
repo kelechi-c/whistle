@@ -77,7 +77,6 @@ def _load_split(
     fixed_tokens: bool,
     temperature: float | None,
     top_k: int,
-    overlap_codec: bool,
 ) -> tuple[Generate, torch.device, float, Any]:
     """Loads the official model for the explicit prefill/decode path."""
     model, device, load_seconds = _load_model(checkpoint or DEFAULT_MODEL)
@@ -93,9 +92,17 @@ def _load_split(
             stop_at_eos=not fixed_tokens,
             temperature=temperature,
             top_k=top_k,
-            overlap_codec=overlap_codec,
         )
-        phases = {name: timings[name] for name in ("prepare", "prefill", "decode", "codec")}
+        phases = {
+            name: timings[name]
+            for name in (
+                "prepare",
+                "prefill",
+                "decode",
+                "codec",
+            )
+            if name in timings
+        }
         return Sample(waveform[0], sample_rate, phases, codec_ids)
 
     return generate, device, load_seconds, model
@@ -289,9 +296,6 @@ def _trace(generate: Generate, device: torch.device, path: pl.Path) -> None:
 @click.option("--temperature", type=click.FloatRange(min=0.01), default=None,
               help="enable do_sample with this temperature (top_k below)")
 @click.option("--top-k", type=click.IntRange(min=1), default=50, show_default=True)
-@click.option("--overlap-codec/--no-overlap-codec", default=False,
-              help="decode finished frames on a side stream during the loop "
-                   "(net loss on small GPUs; for A/B on bigger GPUs)")
 @click.option(
     "--fixed-tokens",
     is_flag=True,
@@ -314,7 +318,6 @@ def main(
     repetition_penalty: float,
     temperature: float | None,
     top_k: int,
-    overlap_codec: bool,
     fixed_tokens: bool,
     iterations: int,
     warmup: int,
@@ -337,7 +340,6 @@ def main(
             fixed_tokens,
             temperature,
             top_k,
-            overlap_codec,
         )
     else:
         loaded = _load_official(

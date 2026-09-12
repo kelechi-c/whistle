@@ -1,0 +1,61 @@
+{
+  "backend": "official",
+  "codec_parity_checked": false,
+  "repetition_penalty": 1.2,
+  "fixed_tokens": false,
+  "model": null,
+  "text_file": "alicia.txt",
+  "text_characters": 1264,
+  "token_count": 1280,
+  "expected_codec_frames": 1216,
+  "load_seconds": 62.235602019,
+  "iterations": [
+    {
+      "wall_seconds": 83.69857480300016,
+      "audio_seconds": 97.28,
+      "rtf": 0.8603883100637352,
+      "xrt": 1.1622659075016057,
+      "peak_memory_mb": 2836.7353515625,
+      "phases": {}
+    },
+    {
+      "wall_seconds": 84.16093347499918,
+      "audio_seconds": 97.28,
+      "rtf": 0.865141174701883,
+      "xrt": 1.1558807154735036,
+      "peak_memory_mb": 2836.8837890625,
+      "phases": {}
+    },
+    {
+      "wall_seconds": 83.9428977839998,
+      "audio_seconds": 97.28,
+      "rtf": 0.8628998538651295,
+      "xrt": 1.1588830332057272,
+      "peak_memory_mb": 2836.8837890625,
+      "phases": {}
+    },
+    {
+      "wall_seconds": 84.05224895700121,
+      "audio_seconds": 97.28,
+      "rtf": 0.8640239407586473,
+      "xrt": 1.157375337449516,
+      "peak_memory_mb": 2836.8837890625,
+      "phases": {}
+    },
+    {
+      "wall_seconds": 84.50181617900125,
+      "audio_seconds": 97.28,
+      "rtf": 0.8686453143400622,
+      "xrt": 1.1512178601455212,
+      "peak_memory_mb": 2836.8837890625,
+      "phases": {}
+    }
+  ],
+  "mean_wall_seconds": 84.07129423960032,
+  "mean_rtf": 0.8642197187458914,
+  "p50_wall_seconds": 84.05224895700121,
+  "p50_rtf": 0.8640239407586473,
+  "phase_semantics": "non_overlapping",
+  "mean_phases": {},
+  "p50_phases": {}
+}

@@ -1,0 +1,13 @@
+{
+  "runtime": "faster-qwen3-tts",
+  "gpu": "rtx-3050-6gb-victoria",
+  "model": "0.6B",
+  "frames": 128,
+  "warmup_frames": 32,
+  "predictor_calls": 128,
+  "talker_calls": 128,
+  "predictor_total_ms": 3789.510850906372,
+  "talker_total_ms": 2630.7605419158936,
+  "predictor_ms_per_call": 29.605553522706032,
+  "talker_ms_per_call": 20.55281673371792
+}

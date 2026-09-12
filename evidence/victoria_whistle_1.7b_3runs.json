@@ -1,0 +1,80 @@
+{
+  "backend": "split",
+  "codec_parity_checked": true,
+  "repetition_penalty": 1.2,
+  "fixed_tokens": false,
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "text_file": "alicia.txt",
+  "text_characters": 1264,
+  "token_count": 1280,
+  "expected_codec_frames": 1280,
+  "load_seconds": 12.480255069999885,
+  "iterations": [
+    {
+      "wall_seconds": 77.57757236599991,
+      "audio_seconds": 102.4,
+      "rtf": 0.7575934801367179,
+      "xrt": 1.319969120932161,
+      "peak_memory_mb": 4964.08984375,
+      "phases": {
+        "prepare": 0.002326335906982422,
+        "prefill": 0.11951103973388671,
+        "decode": 75.6198828125,
+        "codec": 1.8344395751953124,
+        "codec_side_span": 0.0,
+        "codec_drain": 0.0
+      }
+    },
+    {
+      "wall_seconds": 77.58275430200001,
+      "audio_seconds": 102.4,
+      "rtf": 0.7576440849804689,
+      "xrt": 1.319880957066772,
+      "peak_memory_mb": 4969.4765625,
+      "phases": {
+        "prepare": 0.0026431360244750977,
+        "prefill": 0.1194487075805664,
+        "decode": 75.6240703125,
+        "codec": 1.8349617919921875,
+        "codec_side_span": 0.0,
+        "codec_drain": 0.0
+      }
+    },
+    {
+      "wall_seconds": 77.55480940400003,
+      "audio_seconds": 102.4,
+      "rtf": 0.7573711855859377,
+      "xrt": 1.3203565425140293,
+      "peak_memory_mb": 4968.83984375,
+      "phases": {
+        "prepare": 0.0023409600257873536,
+        "prefill": 0.11917005157470703,
+        "decode": 75.598390625,
+        "codec": 1.8336339111328126,
+        "codec_side_span": 0.0,
+        "codec_drain": 0.0
+      }
+    }
+  ],
+  "mean_wall_seconds": 77.57171202399998,
+  "mean_rtf": 0.7575362502343749,
+  "p50_wall_seconds": 77.57757236599991,
+  "p50_rtf": 0.7575934801367179,
+  "phase_semantics": "non_overlapping",
+  "mean_phases": {
+    "codec": 1.8343450927734375,
+    "codec_drain": 0.0,
+    "codec_side_span": 0.0,
+    "decode": 75.61411458333333,
+    "prefill": 0.11937659962972005,
+    "prepare": 0.0024368106524149578
+  },
+  "p50_phases": {
+    "codec": 1.8344395751953124,
+    "codec_drain": 0.0,
+    "codec_side_span": 0.0,
+    "decode": 75.6198828125,
+    "prefill": 0.1194487075805664,
+    "prepare": 0.0023409600257873536
+  }
+}

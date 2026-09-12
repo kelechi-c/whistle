@@ -1,0 +1,31 @@
+{
+  "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "speaker": "ryan",
+  "language": "English",
+  "text_characters": 1264,
+  "max_new_tokens": 1280,
+  "repetition_penalty": 1.2,
+  "iterations": [
+    {
+      "wall_seconds": 66.45408421799948,
+      "audio_seconds": 102.4,
+      "rtf": 0.6489656661914012,
+      "xrt": 1.540913567691064,
+      "frames": 1280
+    },
+    {
+      "wall_seconds": 66.25306049599749,
+      "audio_seconds": 102.4,
+      "rtf": 0.6470025439062255,
+      "xrt": 1.5455889770735383,
+      "frames": 1280
+    },
+    {
+      "wall_seconds": 66.2681685460011,
+      "audio_seconds": 102.4,
+      "rtf": 0.6471500834570421,
+      "xrt": 1.5452366082656623,
+      "frames": 1280
+    }
+  ]
+}

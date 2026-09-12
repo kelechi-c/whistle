@@ -151,14 +151,13 @@ flowchart LR
         GR["graphs.py<br/>caches, predictor/talker graph classes, mode factory"]
         INI["__init__.py"]
     end
-    subgraph scripts["root scripts"]
-        CLI["infer.py<br/>click CLI: load model → tts_infer → write WAV"]
-        PROF["profile_tts.py<br/>benchmark harness: split/official backends, parity checks, traces"]
-        BENCH["bench_tts.py<br/>LEGACY vanilla qwen-tts benchmark (Base/VoiceDesign/Clone)"]
+    subgraph scripts["development tools"]
+        CLI["src/whistle/cli.py<br/>click CLI: load model → tts_infer → write WAV"]
+        PROF["tools/profile_tts.py<br/>benchmark harness: split/official backends, parity checks, traces"]
     end
     TESTS["tests/test_inference.py<br/>tiny CPU structural regression"]
-    DOCS["docs/*.md, report.md, results.md, exp.md, project.md, README.md"]
-    B["benchmarks/*.json<br/>raw per-iteration measurements"]
+    DOCS["docs/*.md, project.md, README.md"]
+    B["../evidence/*.json<br/>curated per-iteration measurements"]
 
     CLI --> INF
     PROF --> INF
@@ -173,34 +172,30 @@ flowchart LR
 | `src/whistle/inference.py` | 316 | `tts_infer` — the entire request path: prompt, prefill, decode loop, codec. Scheduling lives here. |
 | `src/whistle/graphs.py` | 648 | All cache/graph machinery: `PrefixStaticLayer`, `PredictorGraphs`, `DecoderFfnGraph`, `OfficialTalker`, `PredictorGraph`, `TalkerGraph`, `DecodeGraphs`, `decode_graphs`. |
 | `src/whistle/config.py` | 42 | `RuntimeConfig` dataclass (checkpoint, device, dtype, seed, frame budget). |
-| `infer.py` | 64 | Click CLI: model load + `tts_infer` + WAV write. Lives at repo root. |
-| `profile_tts.py` | 439 | Benchmark/parity harness: `--backend split|official`, `--talker-mode`, `--fixed-tokens`, `--check-codec-parity`, `--trace-out`. |
-| `bench_tts.py` | 246 | Legacy vanilla benchmark of the unmodified `qwen-tts` API (Base / VoiceDesign / clone models). Not part of the optimized path. |
+| `src/whistle/cli.py` | 64 | Click CLI: model load + `tts_infer` + WAV write. Installed as `whistle`. |
+| `tools/profile_tts.py` | 439 | Benchmark/parity harness: `--backend split|official`, `--talker-mode`, `--fixed-tokens`, `--check-codec-parity`, `--trace-out`. |
 | `tests/test_inference.py` | 149 | One CPU structural test with a tiny official-shaped model. |
-| `report.md` | 186 | Concise optimization history + failure analysis (authoritative). |
-| `results.md` | 720 | Full benchmark method, commands, per-run tables, phase breakdowns. |
-| `exp.md` | 314 | Experiment journal: every sandbox experiment and rejection rationale. |
+| `docs/failures_and_trials.md` | — | Curated optimization history and failure analysis. |
+| `docs/results.md` | — | Full benchmark method, commands, and per-run tables. |
 | `docs/qwen3_tts_official_vs_faster.md` | 350 | Official vs `faster-qwen3-tts` architecture comparison (upstream snapshot study). |
 | `project.md` | 142 | Working notes / birds-eye map. |
-| `benchmarks/*.json` | — | Raw machine-readable per-iteration measurements for every version. |
+| `evidence/*.json` | — | Curated machine-readable measurements cited by the retained reports. |
 
-Local-only (gitignored, not pushed): `logs.md`, `logs.txt`, `stash/` (archived
-Nero reimplementation + drafts), `refs/` (upstream checkouts), `.venv/`, the
-`docs/code-predictor-profile.html` Chrome trace, `.pi/` (agent runtime state).
+Local-only (gitignored, not pushed): `local/` (drafts, raw runs, traces, and
+archived experiments), `refs/`, `stash/`, `sandbox/`, `.venv/`, generated
+`docs/*.html`, and machine state such as `.pi/` and `handoff/`.
 
 ### 4.2 The two entry points
 
-- **Interactive generation**: `uv run python infer.py "text" --speaker serena
-  --out whistle.wav` → loads the official checkpoint, runs `tts_infer` (default
-  mode = `predictor-ffn-graphs`), transfers the waveform to CPU once, writes WAV.
-- **Benchmarking**: `uv run python profile_tts.py --backend split|official
-  --text-file alicia.txt ...` → warmups, timed iterations, optional parity
-  check, optional profiler trace, JSON output.
+- **Interactive generation**: `PYTHONPATH=src uv run python -m whistle.cli "text"
+  --speaker ryan --out whistle.wav` → loads the official checkpoint, runs
+  `tts_infer` (default mode = `predictor-ffn-graphs`), transfers the waveform to
+  CPU once, and writes WAV.
+- **Benchmarking**: `uv run python tools/profile_tts.py --backend split|official
+  --text-file testdata/alicia.txt ...` → warmups, timed iterations, optional parity
+  check, optional profiler trace, and JSON output under `local/`.
 
-⚠️ **Known packaging defects** (documented, not yet fixed — see §12):
-the `[project.scripts]` entry `whistle = "whistle.infer:main"` points at a
-module that does not exist under `src/` (the CLI is the root `infer.py`), and
-`RuntimeConfig.dtype` defaults to the misspelled `"bflloat16"`.
+The package exposes the `whistle` console script from `src/whistle/cli.py`.
 
 ---
 
@@ -447,7 +442,7 @@ between frames.
 | Setting | Value |
 |---|---|
 | Model | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` |
-| Input | complete `alicia.txt` (a letter, ~1.5 KB) |
+| Input | complete `testdata/alicia.txt` (a letter, ~1.5 KB) |
 | Speaker / language | Ryan / English (historical benchmark) |
 | dtype / attention | bfloat16 / PyTorch SDPA |
 | GPU | RTX 3050 Laptop GPU 6 GB |
@@ -469,19 +464,19 @@ listening tests (the repaired path stops at 1,216 frames / 97.28 s).
 Official baseline:
 
 ```bash
-uv run --no-sync python profile_tts.py --text-file alicia.txt --backend official \
+uv run --no-sync python tools/profile_tts.py --text-file testdata/alicia.txt --backend official \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice --speaker Ryan --lang English \
   --max-new-tokens 1280 --fixed-tokens --warmup 1 --iterations 3 \
-  --json-out benchmarks/official_tts_0.6b_alicia.json
+  --json-out local/benchmarks/official_tts_0.6b_alicia.json
 ```
 
 V7 (promoted split path):
 
 ```bash
-uv run python profile_tts.py --text-file alicia.txt --backend split \
+uv run python tools/profile_tts.py --text-file testdata/alicia.txt --backend split \
   --talker-mode predictor-ffn-graphs --speaker Ryan --lang English \
   --max-new-tokens 1279 --fixed-tokens --repetition-penalty 1.2 \
-  --warmup 1 --iterations 3 --json-out benchmarks/v7_exact_graphs_0.6b_alicia.json
+  --warmup 1 --iterations 3 --json-out local/benchmarks/v7_exact_graphs_0.6b_alicia.json
 ```
 
 ### 7.3 Measurement rules learned the hard way
@@ -536,7 +531,7 @@ V7*       56.9  █████████████████████�
 ### 8.2 Baseline: official nested generation (91.722 s)
 
 Official `qwen-tts` CustomVoice path, fixed 1,280 tokens. Phase breakdown
-(non-overlapping, from `benchmarks/official_tts_0.6b_alicia.json`):
+(non-overlapping, from `../evidence/official_tts_0.6b_alicia.json`):
 
 | Phase | Mean (s) | Share |
 |---|---:|---:|
@@ -772,7 +767,7 @@ flowchart LR
     F --> G["plausible audio, wrong tokens —<br/>undetectable by listening"]
 ```
 
-The parity gate (from `exp.md`, in escalation order):
+The parity gate (from the archived experiment journal, in escalation order):
 
 1. codec tensor shape;
 2. location of the first differing codec ID;
@@ -803,7 +798,7 @@ Plausible audio was explicitly declared insufficient evidence.
 ### 9.3 Greedy-policy collapse (a *separate* failure mode)
 
 Repetition penalties 1.05 and 1.1 drove the greedy model into a low-energy
-repetitive state after ~16 s on `alicia.txt` — the audio sounded truncated
+repetitive state after ~16 s on `testdata/alicia.txt` — the audio sounded truncated
 but still contained samples. This was a **generation-policy collapse, not a
 waveform bug**. Penalty 1.2 keeps energy healthy and reaches natural EOS.
 
@@ -879,7 +874,7 @@ Repaired natural-EOS reference (official-eager mode, rp=1.2):
 - `decode_graphs` (637) — `functools.cache`d per `(talker, max_cache_len,
   mode)`; captures once.
 
-**`profile_tts.py`**
+**`tools/profile_tts.py`**
 
 - `--backend split` = `tts_infer`; `--backend official` = the official API
   path (`_official_sample`, 101).
@@ -905,20 +900,17 @@ only** — not speech quality, CUDA capture, or latency.
 
 | Severity | Issue | Proposed fix |
 |---|---|---|
-| high | `config.py:20` — `dtype` default is `"bflloat16"` (typo); `resolved_dtype` does `getattr(torch, self.dtype)` → default CLI crashes before model load | change to `"bfloat16"` |
-| high | `pyproject.toml:14` — console script points to `whistle.infer:main`, but the CLI lives at root `infer.py` and package discovery is `where=["src"]` | move CLI into `src/whistle/infer.py` or drop the entry point |
-| high | README still says "Qwen3-TTS **and Qwen3-ASR**"; ASR code was removed | make README TTS-only |
-| high | `qwen3tts.md` describes the 25 Hz / 32-codebook / 31-residual variant; the active benchmark is 12 Hz / 16-codebook / 15-residual | label the doc by variant or rewrite for the active model |
-| medium | `results.md` references `faster_decode.py`, `profile_tts_modular.py`, and `sandbox/latency_lab/*.json` — none exist in the current tree | mark as historical; keep provenance notes |
-| medium | V7 parity evidence (20,480 IDs / 2,457,600 samples) is not reproducible from the checked-in repo — the validation artifacts live outside it, and `v7_exact_graphs_0.6b_alicia.json` records `codec_parity_checked: false` for its own run | preserve the validation JSON in-repo with provenance |
+| high | The CLI used to live at the repository root and the console-script target was stale | fixed: `src/whistle/cli.py` is packaged as `whistle` |
+| high | README and source notes mixed shipped TTS with external ASR evaluation | fixed: ASR remains an optional tool under `tools/` |
+| medium | Historical result links used the ignored raw `benchmarks/` tree | fixed: cited JSON is under `evidence/`; new runs write to ignored `local/benchmarks/` |
+| medium | V7 parity evidence was previously outside the repository | fixed: the parity artifact is tracked under `evidence/` with this source map |
 | medium | `decode_graphs` permanently wraps `talker.model.layers` for `predictor-ffn-graphs`; mode switches on a loaded model are not reversible and untested | document reload-between-modes or add unwrapping |
 | low | capacity checks disagree at the boundary: `tts_infer` allows position 2048 while `OfficialTalker.run` rejects it (`>=` vs `>`) | align the off-by-one and add a regression test |
-| low | `lt-report.md` (RTX 3060, 2,048-token run) is an older exploratory report | add a "superseded by results.md" header |
+| low | `local/prose/lt-report.md` (RTX 3060, 2,048-token run) is an older exploratory report | retain it as local historical context |
 | low | `bench_tts.py` uses flash-attention-2 and different speaker/text defaults — it's a legacy vanilla benchmark | label as legacy in its docstring/README |
 
-None of these were fixed while writing this document (documentation-only
-scope); the defect list is intentionally preserved so the article can be
-honest about the repo's state.
+The remaining entries are historical or release-scope notes; the packaging and
+path defects listed above were corrected during the shipping separation.
 
 ---
 
@@ -964,12 +956,12 @@ table until it passes the independent full codec-token + waveform validation.
 
 | Topic | Where |
 |---|---|
-| Optimization history + failure analysis | `report.md` |
-| Benchmark method + per-run data | `results.md` |
-| Experiment journal + rejections | `exp.md` |
+| Optimization history + failure analysis | `docs/failures_and_trials.md` |
+| Benchmark method + per-run data | `docs/results.md` |
+| Experiment journal + rejections | `local/prose/` and `local/benchmarks/` |
 | Upstream official-vs-faster comparison | `docs/qwen3_tts_official_vs_faster.md` |
 | Working notes / decode boundary map | `project.md` |
-| Article-thought draft | `blog_drafts.md` (local) |
-| V7 fixed-budget measurements | `benchmarks/v7_exact_graphs_0.6b_alicia.json` |
-| Natural-EOS parity evidence | `benchmarks/correctness_greedy_rp1_2_parity_0.6b_alicia.json` |
+| Article-thought draft | `local/prose/blog_drafts.md` |
+| V7 fixed-budget measurements | `../evidence/v7_exact_graphs_0.6b_alicia.json` |
+| Natural-EOS parity evidence | `../evidence/correctness_greedy_rp1_2_parity_0.6b_alicia.json` |
 | Active runtime source | `src/whistle/inference.py`, `src/whistle/graphs.py` |

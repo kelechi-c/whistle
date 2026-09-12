@@ -1,0 +1,80 @@
+{
+  "backend": "split",
+  "codec_parity_checked": true,
+  "repetition_penalty": 1.2,
+  "fixed_tokens": false,
+  "model": null,
+  "text_file": "alicia.txt",
+  "text_characters": 1264,
+  "token_count": 1280,
+  "expected_codec_frames": 1216,
+  "load_seconds": 26.60472564500003,
+  "iterations": [
+    {
+      "wall_seconds": 54.25021617799996,
+      "audio_seconds": 97.28,
+      "rtf": 0.5576708077508219,
+      "xrt": 1.7931725779822767,
+      "peak_memory_mb": 3032.306640625,
+      "phases": {
+        "prepare": 0.002150719881057739,
+        "prefill": 0.05065750503540039,
+        "decode": 52.43861328125,
+        "codec": 1.7534639892578125,
+        "codec_side_span": 0.0,
+        "codec_drain": 0.0
+      }
+    },
+    {
+      "wall_seconds": 54.21827009499998,
+      "audio_seconds": 97.28,
+      "rtf": 0.557342414627878,
+      "xrt": 1.7942291376974637,
+      "peak_memory_mb": 3037.46484375,
+      "phases": {
+        "prepare": 0.0020731201171875,
+        "prefill": 0.05084262466430664,
+        "decode": 52.40685546875,
+        "codec": 1.7543885498046874,
+        "codec_side_span": 0.0,
+        "codec_drain": 0.0
+      }
+    },
+    {
+      "wall_seconds": 54.267205336000075,
+      "audio_seconds": 97.28,
+      "rtf": 0.5578454495888165,
+      "xrt": 1.7926111985624191,
+      "peak_memory_mb": 3037.462890625,
+      "phases": {
+        "prepare": 0.0021210880279541014,
+        "prefill": 0.05068406295776367,
+        "decode": 52.45956640625,
+        "codec": 1.75355615234375,
+        "codec_side_span": 0.0,
+        "codec_drain": 0.0
+      }
+    }
+  ],
+  "mean_wall_seconds": 54.24523053633334,
+  "mean_rtf": 0.5576195573225055,
+  "p50_wall_seconds": 54.25021617799996,
+  "p50_rtf": 0.5576708077508219,
+  "phase_semantics": "non_overlapping",
+  "mean_phases": {
+    "codec": 1.7538028971354167,
+    "codec_drain": 0.0,
+    "codec_side_span": 0.0,
+    "decode": 52.43501171875,
+    "prefill": 0.0507280642191569,
+    "prepare": 0.0021149760087331134
+  },
+  "p50_phases": {
+    "codec": 1.75355615234375,
+    "codec_drain": 0.0,
+    "codec_side_span": 0.0,
+    "decode": 52.43861328125,
+    "prefill": 0.05068406295776367,
+    "prepare": 0.0021210880279541014
+  }
+}

@@ -1,4 +1,4 @@
-"""CLI for the explicit official-module inference baseline."""
+"""Command-line entry point for single-shot Whistle synthesis."""
 
 from dataclasses import replace
 import pathlib as pl
@@ -8,15 +8,15 @@ from qwen_tts import Qwen3TTSModel
 import soundfile as sf
 import torch
 
-from whistle.config import DTypeChoice, DeviceChoice, RUNTIME
+from whistle.config import DTypeChoice, DeviceChoice, LANGUAGE, RUNTIME, SPEAKER
 from whistle.inference import tts_infer
 
 
 @click.command()
 @click.argument("text")
 @click.option("--checkpoint", default=str(RUNTIME.checkpoint), show_default=True)
-@click.option("--speaker", default="ryan", show_default=True)
-@click.option("--language", default="english", show_default=True)
+@click.option("--speaker", default=SPEAKER, show_default=True)
+@click.option("--language", default=LANGUAGE, show_default=True)
 @click.option("--max-frames", type=click.IntRange(min=1), default=RUNTIME.max_frames)
 @click.option("--device", "device_choice", type=click.Choice(["auto", "cpu", "cuda"]), default=RUNTIME.device)
 @click.option("--dtype", "dtype_choice", type=click.Choice(["float32", "float16", "bfloat16"]), default=RUNTIME.dtype)
@@ -31,7 +31,7 @@ def main(
     dtype_choice: DTypeChoice,
     out: pl.Path,
 ) -> None:
-    """Loads the model, synthesizes TEXT, and writes its waveform."""
+    """Load the model, synthesize TEXT, and write its waveform."""
     runtime = replace(RUNTIME, device=device_choice, dtype=dtype_choice, max_frames=max_frames, output=out)
     device = runtime.resolved_device()
     torch.manual_seed(runtime.seed)
@@ -53,9 +53,6 @@ def main(
         f"decode: {timings['decode'] * 1000:.2f} ms; "
         f"codec: {timings['codec'] * 1000:.2f} ms"
     )
-
-
-__all__ = ["tts_infer"]
 
 
 if __name__ == "__main__":

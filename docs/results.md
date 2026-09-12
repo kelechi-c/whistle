@@ -2,7 +2,7 @@
 
 ## Version summary
 
-All versions use the complete [Alicia input](alicia.txt), Ryan, English,
+All versions use the complete [Alicia input](../testdata/alicia.txt), Ryan, English,
 bfloat16, SDPA, three measured runs, and 1,279 complete codec frames (102.320
 seconds of audio). V5.1 and V6 exclude three full warmups; earlier results use
 their recorded warmup policy.
@@ -36,7 +36,7 @@ This baseline uses the official `qwen-tts` runtime and
 
 ### Method
 
-Every run uses the complete contents of [alicia.txt](alicia.txt). The profiler
+Every run uses the complete contents of [testdata/alicia.txt](../testdata/alicia.txt). The profiler
 forces `min_new_tokens == max_new_tokens == 1280`, preventing EOS from making
 one implementation finish early. The official generator produces 1,279
 complete codec frames from those 1,280 selected talker tokens, or 102.320
@@ -46,8 +46,8 @@ One warmup is excluded. The reported p50 values are the medians of three
 measured runs.
 
 ```bash
-uv run --no-sync python profile_tts.py \
-  --text-file alicia.txt \
+uv run --no-sync python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend official \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
@@ -56,7 +56,7 @@ uv run --no-sync python profile_tts.py \
   --fixed-tokens \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/official_tts_0.6b_alicia.json
+  --json-out local/benchmarks/official_tts_0.6b_alicia.json
 ```
 
 ### Per-run results
@@ -91,7 +91,7 @@ the inclusive talker measurement.
 | Wrapper overhead | 46.65 ms | 0.05% |
 
 The complete machine-readable report is
-[`benchmarks/official_tts_0.6b_alicia.json`](benchmarks/official_tts_0.6b_alicia.json).
+[`../evidence/official_tts_0.6b_alicia.json`](../evidence/official_tts_0.6b_alicia.json).
 
 ## Explicit `faster_decode` baseline
 
@@ -109,8 +109,8 @@ Both paths therefore produce 1,279 frames and 102.320 seconds of audio. One
 warmup is excluded, followed by three measured runs.
 
 ```bash
-uv run --no-sync python profile_tts.py \
-  --text-file alicia.txt \
+uv run --no-sync python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend split \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
@@ -119,7 +119,7 @@ uv run --no-sync python profile_tts.py \
   --fixed-tokens \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/faster_decode_0.6b_alicia.json
+  --json-out local/benchmarks/faster_decode_0.6b_alicia.json
 ```
 
 ### Per-run results
@@ -173,10 +173,10 @@ cached backbone forward, and next-token selection. “Other” is the decode wal
 time left after subtracting the three CUDA-event regions.
 
 The machine-readable diagnostic report is
-[`benchmarks/faster_decode_0.6b_alicia_breakdown.json`](benchmarks/faster_decode_0.6b_alicia_breakdown.json).
+[`../evidence/faster_decode_0.6b_alicia_breakdown.json`](../evidence/faster_decode_0.6b_alicia_breakdown.json).
 
 The complete machine-readable report is
-[`benchmarks/faster_decode_0.6b_alicia.json`](benchmarks/faster_decode_0.6b_alicia.json).
+[`../evidence/faster_decode_0.6b_alicia.json`](../evidence/faster_decode_0.6b_alicia.json).
 
 ## `faster_decode` v2 — reduced Python/CPU sync overhead
 
@@ -189,8 +189,8 @@ The split API now counts completed codec frames directly, so this command uses
 1,279 frames to match the retained official baseline's 1,280-token output.
 
 ```bash
-uv run --no-sync python profile_tts.py \
-  --text-file alicia.txt \
+uv run --no-sync python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend split \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
@@ -198,7 +198,7 @@ uv run --no-sync python profile_tts.py \
   --max-new-tokens 1279 \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/v2_faster_decode_0.6b_alicia.json
+  --json-out local/benchmarks/v2_faster_decode_0.6b_alicia.json
 ```
 
 ### Per-run results
@@ -233,7 +233,7 @@ reintroducing fine-grained synchronization into the optimized loop.
 | Preparation | 1.99 ms | <0.01% |
 
 The complete v2 report is
-[`benchmarks/v2_faster_decode_0.6b_alicia.json`](benchmarks/v2_faster_decode_0.6b_alicia.json).
+[`../evidence/v2_faster_decode_0.6b_alicia.json`](../evidence/v2_faster_decode_0.6b_alicia.json).
 
 ## `faster_decode` v3 — static cache + torch-compiled predictor pass
 
@@ -243,8 +243,8 @@ once with `torch.compile(mode="reduce-overhead")` and reused across frames.
 The excluded warmup absorbs predictor compilation before measurements begin.
 
 ```bash
-uv run --no-sync python profile_tts.py \
-  --text-file alicia.txt \
+uv run --no-sync python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend split \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
@@ -252,7 +252,7 @@ uv run --no-sync python profile_tts.py \
   --max-new-tokens 1279 \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/v3_faster_decode_0.6b_alicia.json
+  --json-out local/benchmarks/v3_faster_decode_0.6b_alicia.json
 ```
 
 ### Per-run results
@@ -287,20 +287,20 @@ V3 is 15.44% lower latency than v2 and 37.33% lower than the retained official
 baseline, equivalent to a 1.596× speedup over official inference.
 
 The complete v3 report is
-[`benchmarks/v3_faster_decode_0.6b_alicia.json`](benchmarks/v3_faster_decode_0.6b_alicia.json).
+[`../evidence/v3_faster_decode_0.6b_alicia.json`](../evidence/v3_faster_decode_0.6b_alicia.json).
 
 ### Modular decode comparison
 
-The separate `profile_tts_modular.py` harness applies checked CUDA-event
+The separate `local/tools/victoria_modular_bench.py` harness applies checked CUDA-event
 instrumentation to an in-memory copy of the current hot path. It does not edit
 `faster_decode.py`, synchronize between forwards, or include compilation in
 the measured runs.
 
 ```bash
-uv run --no-sync python profile_tts_modular.py \
+uv run --no-sync python local/tools/victoria_modular_bench.py \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/v3_faster_decode_0.6b_alicia_breakdown.json
+  --json-out local/benchmarks/v3_faster_decode_0.6b_alicia_breakdown.json
 ```
 
 | Decode stage | Calls | v1 p50 | v3 p50 | Change | V3 average |
@@ -320,7 +320,7 @@ an A/B run with only the talker cache type changed is required for that.
 
 The instrumented v3 run measured 57.426 seconds p50 wall latency, close to the
 57.477-second uninstrumented headline. The machine-readable breakdown is
-[`benchmarks/v3_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v3_faster_decode_0.6b_alicia_breakdown.json).
+[`../evidence/v3_faster_decode_0.6b_alicia_breakdown.json`](../evidence/v3_faster_decode_0.6b_alicia_breakdown.json).
 
 ### Talker cache A/B
 
@@ -360,7 +360,7 @@ Static talker cache is counterproductive until the talker forward is compiled
 or captured to exploit its fixed addresses and shapes. The immediate
 recommendation is to retain the compiled static-cache predictor but use a
 dynamic talker cache. The A/B report is
-[`benchmarks/v3_dynamic_talker_cache_ab.json`](benchmarks/v3_dynamic_talker_cache_ab.json).
+[`../evidence/v3_dynamic_talker_cache_ab.json`](../evidence/v3_dynamic_talker_cache_ab.json).
 
 ## `faster_decode` v4 — predictor and talker CUDA graphs
 
@@ -373,8 +373,8 @@ The code moved under `src/whistle`, so the current uninstalled source tree
 requires `PYTHONPATH=src` with `uv run --no-sync`.
 
 ```bash
-PYTHONPATH=src uv run --no-sync python profile_tts.py \
-  --text-file alicia.txt \
+PYTHONPATH=src uv run --no-sync python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend split \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
@@ -382,7 +382,7 @@ PYTHONPATH=src uv run --no-sync python profile_tts.py \
   --max-new-tokens 1279 \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/v4_faster_decode_0.6b_alicia.json
+  --json-out local/benchmarks/v4_faster_decode_0.6b_alicia.json
 ```
 
 ### Per-run results
@@ -413,10 +413,10 @@ Asynchronous CUDA events wrap the two graph replay boundaries. They do not
 modify or synchronize inside the captured graphs.
 
 ```bash
-PYTHONPATH=src uv run --no-sync python profile_tts_modular.py \
+PYTHONPATH=src uv run --no-sync python local/tools/victoria_modular_bench.py \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json
+  --json-out local/benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json
 ```
 
 | Decode module | Calls | p50 latency | Share of decode | Average |
@@ -435,9 +435,9 @@ The talker graph is effectively unchanged from v3 static-cache talker
 latency—26.180 versus 26.106 seconds—and remains 40.11% slower than the dynamic
 talker-cache control. Graph replay does not offset full-capacity static-cache
 SDPA work. The headline and modular reports are
-[`benchmarks/v4_faster_decode_0.6b_alicia.json`](benchmarks/v4_faster_decode_0.6b_alicia.json)
+[`../evidence/v4_faster_decode_0.6b_alicia.json`](../evidence/v4_faster_decode_0.6b_alicia.json)
 and
-[`benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v4_faster_decode_0.6b_alicia_breakdown.json).
+[`../evidence/v4_faster_decode_0.6b_alicia_breakdown.json`](../evidence/v4_faster_decode_0.6b_alicia_breakdown.json).
 
 ## `faster_decode` v5 — compiled predictor loop + talker CUDA graph
 
@@ -447,8 +447,8 @@ The one-token talker CUDA graph remains enabled. Predictor compilation and its
 Inductor graph-tree warmups occur before the excluded first full inference.
 
 ```bash
-PYTHONPATH=src uv run --no-sync python profile_tts.py \
-  --text-file alicia.txt \
+PYTHONPATH=src uv run --no-sync python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend split \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
@@ -456,7 +456,7 @@ PYTHONPATH=src uv run --no-sync python profile_tts.py \
   --max-new-tokens 1279 \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/v5_faster_decode_0.6b_alicia.json
+  --json-out local/benchmarks/v5_faster_decode_0.6b_alicia.json
 ```
 
 ### Per-run results
@@ -505,9 +505,9 @@ The compiled predictor loop is 15.43% faster than v4's eager predictor graph
 (15.452 versus 26.180 seconds), though this version changes predictor execution
 as well, so that talker improvement should not be attributed to a single
 isolated talker change without another A/B. The reports are
-[`benchmarks/v5_faster_decode_0.6b_alicia.json`](benchmarks/v5_faster_decode_0.6b_alicia.json)
+[`../evidence/v5_faster_decode_0.6b_alicia.json`](../evidence/v5_faster_decode_0.6b_alicia.json)
 and
-[`benchmarks/v5_faster_decode_0.6b_alicia_breakdown.json`](benchmarks/v5_faster_decode_0.6b_alicia_breakdown.json).
+[`../evidence/v5_faster_decode_0.6b_alicia_breakdown.json`](../evidence/v5_faster_decode_0.6b_alicia_breakdown.json).
 
 ## `faster_decode` v5.1 — explicit-mask talker graph
 
@@ -517,8 +517,8 @@ warmup left a late setup pass in the first measured iteration, so the canonical
 result uses three excluded full-inference warmups before three measurements.
 
 ```bash
-PYTHONPATH=src uv run --no-sync python profile_tts.py \
-  --text-file alicia.txt \
+PYTHONPATH=src uv run --no-sync python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend split \
   --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
   --speaker Ryan \
@@ -526,7 +526,7 @@ PYTHONPATH=src uv run --no-sync python profile_tts.py \
   --max-new-tokens 1279 \
   --warmup 3 \
   --iterations 3 \
-  --json-out benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json
+  --json-out local/benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json
 ```
 
 ### Per-run results
@@ -569,9 +569,9 @@ graphed-talker configuration — but its explicit-mask SDPA path is slower than
 the dynamic-eager A/B talker (18.685 s). The talker has therefore been reverted
 to dynamic-eager `DynamicCache` (no graph); the current correct baseline is the
 A/B candidate (50.011 s) with the compiled predictor loop retained. The reports are
-[`benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_warm3.json)
+[`../evidence/v5_1_faster_decode_0.6b_alicia_warm3.json`](../evidence/v5_1_faster_decode_0.6b_alicia_warm3.json)
 and
-[`benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json`](benchmarks/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json).
+[`../evidence/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json`](../evidence/v5_1_faster_decode_0.6b_alicia_breakdown_warm3.json).
 
 ## `faster_decode` v6 — compiled explicit-mask talker
 
@@ -594,7 +594,7 @@ codebook 13 (`split=344`, `official=1484`), after 1,181 of 20,448 shared IDs
 match. Frame 0 and frame-1 codebooks 0–12 match, which localizes the first
 flip to the predictor sequence conditioned on the first compiled talker
 hidden state; autoregression then amplifies it. The modular artifact is
-[`benchmarks/v6_compiled_talker_0.6b_alicia_breakdown.json`](benchmarks/v6_compiled_talker_0.6b_alicia_breakdown.json).
+[`../evidence/v6_compiled_talker_0.6b_alicia_breakdown.json`](../evidence/v6_compiled_talker_0.6b_alicia_breakdown.json).
 
 The profiler now writes its benchmark JSON before running the optional,
 untimed parity assertion, so future failing parity runs retain their timing
@@ -613,8 +613,8 @@ The fixed-budget benchmark uses the historical 1,280-selected-token contract:
 Alicia input. One full warmup is excluded, followed by three measured runs.
 
 ```bash
-uv run python profile_tts.py \
-  --text-file alicia.txt \
+uv run python tools/profile_tts.py \
+  --text-file testdata/alicia.txt \
   --backend split \
   --talker-mode predictor-ffn-graphs \
   --speaker Ryan \
@@ -624,7 +624,7 @@ uv run python profile_tts.py \
   --repetition-penalty 1.2 \
   --warmup 1 \
   --iterations 3 \
-  --json-out benchmarks/v7_exact_graphs_0.6b_alicia.json
+  --json-out local/benchmarks/v7_exact_graphs_0.6b_alicia.json
 ```
 
 ### Per-run results
@@ -664,11 +664,10 @@ matched all 20,480 codec IDs and 2,457,600 waveform samples exactly.
 V7 is 38.01% lower latency than the retained official baseline. It is 0.50%
 slower than V6, but V6 fails codec parity and is not a valid quality result.
 The machine-readable fixed-budget report is
-[`benchmarks/v7_exact_graphs_0.6b_alicia.json`](benchmarks/v7_exact_graphs_0.6b_alicia.json).
-The independent full validation and modular reports are in
-[`sandbox/latency_lab/full_validation.json`](sandbox/latency_lab/full_validation.json)
-and
-[`sandbox/latency_lab/predictor_ffn_graphs_modular_128.json`](sandbox/latency_lab/predictor_ffn_graphs_modular_128.json).
+[`../evidence/v7_exact_graphs_0.6b_alicia.json`](../evidence/v7_exact_graphs_0.6b_alicia.json).
+The independent natural-EOS validation record is
+[`../evidence/correctness_greedy_rp1_2_parity_0.6b_alicia.json`](../evidence/correctness_greedy_rp1_2_parity_0.6b_alicia.json).
+The raw modular diagnostic remains in the ignored local experiment archive.
 
 ## Greedy correctness recovery
 
@@ -717,4 +716,13 @@ EOS:
 | RMS, 64–97.28 s | 0.02298 |
 
 The machine-readable validation is
-[`benchmarks/correctness_greedy_rp1_2_parity_0.6b_alicia.json`](benchmarks/correctness_greedy_rp1_2_parity_0.6b_alicia.json).
+[`../evidence/correctness_greedy_rp1_2_parity_0.6b_alicia.json`](../evidence/correctness_greedy_rp1_2_parity_0.6b_alicia.json).
+
+
+### Codec overlap: slower on both GPUs
+
+Decoding every **eight frames** on a second stream, with **25-frame left context**, increased latency:
+
+- **RTX 3050:** 56.92→64.28s.
+- **RTX PRO 6000, 0.6B:** 25.39→33.29s (**+31.1%**).
+- **RTX PRO 6000, 1.7B:** 27.14→35.53s (**+30.9%**).

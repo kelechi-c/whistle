@@ -54,7 +54,7 @@ diagnostic, while its complete predictor sequence is slightly longer. This
 supports the idea that its larger talker graph can win on the PRO 6000. It
 does not explain the Victoria reversal by itself: the modular check was only
 run on Modal, and the two packages use different cache, attention, and
-predictor policies. Raw checks are `benchmarks/modal/modular_whistle_0.6B.json`,
+predictor policies. Raw checks are `../local/benchmarks/modal/modular_whistle_0.6B.json`,
 `modular_whistle_1.7B.json`, `modular_faster_0.6B.json`, and
 `modular_faster_1.7B.json`.
 
@@ -79,7 +79,7 @@ graph was 5.10/6.66 ms per call versus Whistle's 9.97/9.96 ms. The crossover
 is consistent with fixed-cache attention and eager-versus-graph boundaries
 interacting differently with GPU memory bandwidth and launch cost, but these
 traces do not isolate a single causal factor. Raw checks are
-`benchmarks/victoria_modular_whistle_0.6B.json`,
+`../evidence/victoria_modular_whistle_0.6B.json`,
 `victoria_modular_whistle_1.7B.json`, `victoria_modular_faster_0.6B.json`, and
 `victoria_modular_faster_1.7B.json`.
 
@@ -110,16 +110,16 @@ The 0.1 ms `codec_drain` is host enqueue duration around an asynchronous wait, n
 ## Evidence index and cost snapshots
 
 3050 raw files:
-- `benchmarks/official_current_p50_5runs.json`
-- `benchmarks/v7_current_p50_5runs.json`
-- `benchmarks/official_1.7b_3runs.json`
-- `benchmarks/v7_1.7b_3runs.json`
-- `benchmarks/victoria_whistle_0.6b_3runs.json`
-- `benchmarks/victoria_whistle_1.7b_3runs.json`
-- `benchmarks/victoria_faster_0.6b_3runs.json`
-- `benchmarks/victoria_faster_1.7b_3runs.json`
+- `../evidence/official_current_p50_5runs.json`
+- `../evidence/v7_current_p50_5runs.json`
+- `../evidence/official_1.7b_3runs.json`
+- `../evidence/v7_1.7b_3runs.json`
+- `../evidence/victoria_whistle_0.6b_3runs.json`
+- `../evidence/victoria_whistle_1.7b_3runs.json`
+- `../evidence/victoria_faster_0.6b_3runs.json`
+- `../evidence/victoria_faster_1.7b_3runs.json`
 
-PRO 6000 directories under `benchmarks/modal/`:
+PRO 6000 directories under `../local/benchmarks/modal/`:
 - Official 0.6B: `20260907T225747Z-official-serial-1ef73351`
 - Whistle 0.6B: `20260907T214837Z-split-serial-a1d78b3e`
 - Official 1.7B: `20260907T225819Z-official-serial-020df549`
