@@ -1,0 +1,11 @@
+{
+  "runtime": "whistle",
+  "model": "1.7B",
+  "frames": 128,
+  "predictor_calls": 128,
+  "talker_calls": 127,
+  "predictor_total_ms": 1274.8574752807617,
+  "talker_total_ms": 1264.6436462402344,
+  "predictor_ms_per_call": 9.959824025630951,
+  "talker_ms_per_call": 9.957823986143577
+}

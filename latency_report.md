@@ -1,6 +1,17 @@
 # Whistle latency report
 
-Reviewed 2026-09-09. Models are **0.6B and 1.7B** (there is no 0.7B checkpoint in this campaign). This report consolidates saved Modal and Victoria measurements.
+Reviewed 2026-09-13. Models are **0.6B and 1.7B** (there is no 0.7B checkpoint in this campaign). This report consolidates the saved RTX 3050, RTX PRO 6000, and Modal measurements cited below. Raw records live in `evidence/`; the write-up and its figures live outside this repo, and older ad-hoc run directories were archived out of the released tree.
+
+## Release validation: RTX 3050 Laptop, 6 GB (2026-09-13, mains power)
+
+Same-session pair, re-measured after an earlier battery-powered run looked thermally throttled. Alicia, 0.6B, bf16, greedy, natural EOS, two full warmups then five measured passes per runtime, one backend per process. The official reference is a pristine model in its own process, which is also what the codec/waveform parity check compares against.
+
+| Model | Runtime | Passes | Median wall (s) | Wall range (s) | Audio (s) / frames | Median RTF ↓ | Median × real-time ↑ | Peak allocated MiB |
+|---|---|---:|---:|---|---|---:|---:|---:|
+| 0.6B | Official | 5 | 83.260 | 82.897–85.776 | 97.28 / 1,216 | 0.856 | 1.168 | 2,837 |
+| 0.6B | Whistle | 5 | 54.268 | 54.257–54.329 | 97.28 / 1,216 | 0.558 | 1.793 | 3,037 |
+
+Whistle's median wall time is **34.8% lower** than the official runtime's in this pair (1.53× faster), and the recorded codec ids and waveform are **bit-identical across all 1,216 frames** (`release_whistle_0.6b_5runs.json`, `release_official_0.6b_5runs.json`). A battery-powered repeat of the same configuration measured Whistle at 59.69 s / RTF 0.614; that run is consistent with a power/thermal limit rather than a code change, and is not used in any headline number. The 2026-09-09 five-pass set below (84.052 s official / 54.310 s Whistle) is the historical measurement the article cites.
 
 ## Core comparison: RTX 3050 Laptop, 6 GB
 
@@ -54,7 +65,7 @@ diagnostic, while its complete predictor sequence is slightly longer. This
 supports the idea that its larger talker graph can win on the PRO 6000. It
 does not explain the Victoria reversal by itself: the modular check was only
 run on Modal, and the two packages use different cache, attention, and
-predictor policies. Raw checks are `../local/benchmarks/modal/modular_whistle_0.6B.json`,
+predictor policies. Raw checks are `evidence/modular_whistle_0.6B.json`,
 `modular_whistle_1.7B.json`, `modular_faster_0.6B.json`, and
 `modular_faster_1.7B.json`.
 
@@ -79,7 +90,7 @@ graph was 5.10/6.66 ms per call versus Whistle's 9.97/9.96 ms. The crossover
 is consistent with fixed-cache attention and eager-versus-graph boundaries
 interacting differently with GPU memory bandwidth and launch cost, but these
 traces do not isolate a single causal factor. Raw checks are
-`../evidence/victoria_modular_whistle_0.6B.json`,
+`evidence/victoria_modular_whistle_0.6B.json`,
 `victoria_modular_whistle_1.7B.json`, `victoria_modular_faster_0.6B.json`, and
 `victoria_modular_faster_1.7B.json`.
 
@@ -89,17 +100,40 @@ traces do not isolate a single causal factor. Raw checks are
 - **Upstream generation policy:** the worker passes `do_sample=False` to `generate_custom_voice`, but the inspected upstream `model.py` constructs `PredictorGraph(do_sample=True, top_k=50, temperature=0.9)`; `fast_generate` calls that graph without overriding its policy. The run therefore must not be labeled proven all-greedy. Saved 0.6B outputs vary in length. The exact imported wheel source was not archived, and the local repository snapshot is not a substitute for that missing provenance.
 - **Software and attention:** upstream uses qwen-tts-hf / Transformers 5 and requests eager attention; Whistle/official used qwen-tts 0.1.1 / Transformers 4.57.3 and SDPA. The Modal images were not fully locked. Same GPU and text do not make these a controlled runtime-only A/B.
 - **Warmup:** Whistle's batch harness uses two complete generation warmups. The upstream Alicia worker uses two shortened warmups: first 64 characters, at most 20 tokens. Three and five measured-pass sets are retained as recorded. The supporting isolated upstream 1.7B five-pass median is 23.958 s, consistent with the three-pass 24.072 s.
-- **Stopping and correctness:** capped 1,280-frame output is not verified natural EOS. Serial Whistle checks reported exact IDs/waveforms against an in-process official path that retained Whistle's FFN wrappers; they are not fresh unmodified-model parity tests. Upstream Alicia runs did not save codec-ID parity or WAV quality evidence.
+- **Stopping and correctness:** capped 1,280-frame output is not verified natural EOS. The earlier serial Whistle checks reported exact IDs/waveforms against an in-process official path that retained Whistle's FFN wrappers; those were not fresh unmodified-model parity tests. The 2026-09-13 release validation replaces them: the comparison now runs against a pristine official model in a separate process and matched exactly at all 1,216 frames. Upstream Alicia runs did not save codec-ID parity or WAV quality evidence.
 - **Timing boundary:** Whistle returns a completed device waveform; official/upstream return CPU audio. WAV file writing is excluded. These are entrypoint wall measurements, not identical CPU-ready service latencies.
 - **Scope:** a definitive fair ranking would require pinned environments, verified predictor policies, consistent warmup/output boundaries, matched frame work, and independent quality/correctness validation. The Victoria cross-check improves the evidence but does not remove those controls.
 
 ## Streaming observations (separate workload)
 
-Only **Whistle 0.6B on RTX PRO 6000** has saved Alicia first-chunk measurements here: median **93.100 ms**, trials **103.160, 87.114, 93.100 ms**; median full stream **29.449 s**. Short/medium TTFA medians are **93.144 / 84.924 ms**. Timing starts before iteration and ends after the first tensor's CPU copy. The schedule ramps at cumulative frames **2, 4, 8**, then every 12 frames, with leading-silence trimming enabled. “Chunk size 12” alone was an incomplete description. One short warmup and three repetitions were used; this is not network/playback latency.
+### RTX 3050, time to first CPU-ready audio (2026-09-13)
+
+Alicia and a short sentence, 0.6B, bf16, chunk ramp at frames **2, 4, 8** then
+every **12** frames, 25-frame codec left context, leading-silence trim on. One
+warmup and three measured repetitions. Timing starts before iteration and ends
+after a **blocking CPU copy of the first chunk's audio** — that is, prefill +
+first-chunk decode + host transfer, which is when a player can actually start.
+
+| Text | Frames | First CPU-ready audio (median) | Trials (ms) | Total stream (median) | Audio | Peak MiB |
+|---|---:|---:|---|---:|---:|---:|
+| Short (74 chars) | 77 | **116.0 ms** | 113.1 / 116.4 / 116.0 | 3.65 s | 6.16 s | 2,188 |
+| Alicia (1,264 chars) | 1,216 | **154.1 ms** | 168.6 / 153.9 / 154.1 | 58.68 s | 97.28 s | 2,346 |
+
+Records: `release_streaming_short.json`, `release_streaming_0.6b.json`. The first
+chunk is ready within roughly two to three decode frames, so first-audio latency
+is dominated by prefill and the initial capture rather than by generation length.
+Streaming the whole Alicia letter takes about **8% more wall time** than the
+batch decode above (58.68 s versus 54.27 s) because each chunk re-decodes its
+left context; the trade is first audio in 154 ms instead of 54 s. This is not
+network, playback, or device-output latency.
+
+### RTX PRO 6000 (2026-09-08)
+
+Only **Whistle 0.6B on RTX PRO 6000** has saved Alicia first-chunk measurements here: median **93.100 ms**, trials **103.160, 87.114, 93.100 ms**; median full stream **29.449 s**. Short/medium TTFA medians are **93.144 / 84.924 ms**. Timing starts before iteration and ends after the first tensor's CPU copy. The schedule ramps at cumulative frames **2, 4, 8**, then every 12 frames, with leading-silence trimming enabled. “Chunk size 12” alone was an incomplete description. One short warmup and three repetitions were used; this is not network/playback latency. That record was written before the streaming timing rename, so its `ttft_ms` field is the prefill-end timestamp, not the audio-ready milestone; the 3050 table above uses the current definition.
 
 The inspected official package returns full audio rather than incremental chunks. Its first available audio therefore coincides with completion; native streaming TTFA is unavailable. The separate streaming-test script left official sampling at its defaults, while Whistle was greedy. Its Alicia completion median **76.645 s** is a different-policy observation, not a fair TTFA speedup baseline. The core official batch result above is the configured greedy measurement.
 
-Upstream short-text chunk-8 TTFA means were **431 ± 95 ms (0.6B)** and **467 ± 45 ms (1.7B)** while both models shared one GPU. They used Aiden, a different prompt and default sampling; they must not be ranked against Whistle's isolated Ryan/Alicia result. Upstream's printed “RTF” values **2.558 / 2.456 are × real-time**, not wall/audio RTF. Its ms/step calculation uses an approximate 12 Hz conversion, so those values are omitted from the core table. Neither 3050 audio-ready TTFA nor Modal Whistle 1.7B TTFA was measured in this campaign.
+Upstream short-text chunk-8 TTFA means were **431 ± 95 ms (0.6B)** and **467 ± 45 ms (1.7B)** while both models shared one GPU. They used Aiden, a different prompt and default sampling; they must not be ranked against Whistle's isolated Ryan/Alicia result. Upstream's printed “RTF” values **2.558 / 2.456 are × real-time**, not wall/audio RTF. Its ms/step calculation uses an approximate 12 Hz conversion, so those values are omitted from the core table. Modal Whistle 1.7B TTFA remains unmeasured.
 
 ## Codec overlap remains a failed configuration
 
@@ -107,31 +141,22 @@ On RTX PRO 6000, Whistle overlap off/on medians were **25.386 → 33.290 s (+31.
 
 The 0.1 ms `codec_drain` is host enqueue duration around an asynchronous wait, not GPU drain time. The side-stream span includes idle waits and cannot be called codec compute time or evidence of concurrent kernel execution. Saved PCM16 off/on WAV RMS differences were 0.00285 / 0.00443 for 0.6B / 1.7B; equal duration is not perceptual equivalence. No codec-ID files were saved for the overlap comparison.
 
-## Evidence index and cost snapshots
+## Evidence index
 
-3050 raw files:
-- `../evidence/official_current_p50_5runs.json`
-- `../evidence/v7_current_p50_5runs.json`
-- `../evidence/official_1.7b_3runs.json`
-- `../evidence/v7_1.7b_3runs.json`
-- `../evidence/victoria_whistle_0.6b_3runs.json`
-- `../evidence/victoria_whistle_1.7b_3runs.json`
-- `../evidence/victoria_faster_0.6b_3runs.json`
-- `../evidence/victoria_faster_1.7b_3runs.json`
+3050 raw files (all under `evidence/`):
+- `official_current_p50_5runs.json`
+- `v7_current_p50_5runs.json`
+- `official_1.7b_3runs.json`
+- `v7_1.7b_3runs.json`
+- `victoria_whistle_0.6b_3runs.json`
+- `victoria_whistle_1.7b_3runs.json`
+- `victoria_faster_0.6b_3runs.json`
+- `victoria_faster_1.7b_3runs.json`
+- `release_whistle_0.6b_5runs.json`, `release_official_0.6b_5runs.json` (2026-09-13 validation)
+- `release_streaming_0.6b.json`, `release_streaming_short.json`
 
-PRO 6000 directories under `../local/benchmarks/modal/`:
-- Official 0.6B: `20260907T225747Z-official-serial-1ef73351`
-- Whistle 0.6B: `20260907T214837Z-split-serial-a1d78b3e`
-- Official 1.7B: `20260907T225819Z-official-serial-020df549`
-- Whistle 1.7B: `20260907T225148Z-split-serial-a666f22e`
-- Upstream alone 0.6B: `20260909T041616Z-faster-custom-single-a99d3f31`
-- Upstream alone 1.7B, three passes: `20260909T042856Z-faster-custom-single-1.7B-3runs-da2bb490`
-- Upstream alone 1.7B, five passes: `20260909T042432Z-faster-custom-single-1.7B-68f1efff`
-- Upstream concurrent Alicia: `20260909T034810Z-faster-custom-963812d7`
-- Upstream concurrent short text: `20260908T215448Z-faster-custom-ba004f01`
-- Streaming 0.6B: `20260908T221919Z-stream-7a43d6a6`
-- Overlap 0.6B / 1.7B: `20260907T220526Z-split-overlap-adc1b544` / `20260907T231146Z-split-overlap-e1bd2876`
-
-Batch directories hold result JSON (upstream uses `0.6B_alicia.json` or `1.7B_alicia.json`). Standard Whistle/official runs also have logs and WAVs. Most benchmark data is gitignored: local existence is not publication.
-
-Reported per-app metered costs: upstream isolated 0.6B **$0.15578027**; isolated 1.7B five-pass **$0.15533526**; isolated 1.7B three-pass **$0.14630431**. The earlier $4.29 workspace snapshot predates these runs and must not be presented as the current final campaign bill. Refresh billing before publication.
+The RTX PRO 6000 rows come from Modal runs whose raw directories are no longer
+part of the released tree — they were archived during the pre-release cleanup —
+so those numbers are cited from this report only. Treat them as
+entrypoint-level comparisons rather than independently reproducible artifacts.
+Every RTX 3050 number resolves to a record in `evidence/`.

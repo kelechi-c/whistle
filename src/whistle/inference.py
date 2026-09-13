@@ -62,8 +62,6 @@ def _select_token(
 
 @dataclass(frozen=True, slots=True)
 class Prompt:
-    """Named prompt-build outputs plus the reset shared decode graphs."""
-
     talker_input: torch.Tensor
     attention_mask: torch.Tensor
     tts_pad: torch.Tensor
@@ -75,8 +73,6 @@ class Prompt:
 
 @dataclass(frozen=True, slots=True)
 class Prefill:
-    """First-frame decode state shared by the batch and streaming loops."""
-
     token: torch.Tensor
     past_hidden: torch.Tensor
     processors: LogitsProcessorList
@@ -122,6 +118,7 @@ def _prefill(
     *,
     repetition_penalty: float,
     stop_at_eos: bool,
+    sampling: dict[str, float] | None = None,
 ) -> Prefill:
     """Runs the prefill forward and selects the first primary token."""
     model = tts.model
@@ -157,6 +154,7 @@ def _prefill(
         eos_token_id=eos_token_id,
         processors=processors,
         allow_eos=stop_at_eos,
+        sampling=sampling,
     )
     prompt.graphs.talker.set_rope_deltas(talker.rope_deltas)
     return Prefill(
@@ -276,8 +274,9 @@ def tts_infer(
     the caller explicitly transfers the completed outputs.
 
     ``temperature`` enables official-style do_sample decoding (top-k + softmax
-    + multinomial); the predictor runs its captured sampled graph set. Audio
-    is decoded after token generation using the official batch codec decoder.
+    + multinomial) for every frame including the first; the predictor runs its
+    captured sampled graph set. Audio is decoded after token generation using
+    the official batch codec decoder.
     """
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be positive")
@@ -307,7 +306,13 @@ def tts_infer(
         cpu_phase_started = now
 
     # === prefill: variable prompt into the selected talker cache ===
-    first = _prefill(tts, prompt, repetition_penalty=repetition_penalty, stop_at_eos=stop_at_eos)
+    first = _prefill(
+        tts,
+        prompt,
+        repetition_penalty=repetition_penalty,
+        stop_at_eos=stop_at_eos,
+        sampling=sampling,
+    )
     talker = tts.model.talker
     if phase_events is not None:
         phase_events[2].record()

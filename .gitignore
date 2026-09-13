@@ -10,21 +10,14 @@ __pycache__/
 /dist/
 /wheels/
 
-# local research, vendor copies, and experimental scratch
+# local scratch that is not part of the release
 /local/
 /refs/
 /stash/
 /sandbox/
-/nero/
-/benchmarks/
 /results/
 /out/
-/article/
-/articles/
-/whistle-test.wav
-
-# generated trace pages
-docs/*.html
+/logs.md
 
 # machine state, credentials, and agent records
 /.commandcode/
@@ -34,8 +27,13 @@ docs/*.html
 /.stignore
 /handoff/
 /AGENTS.md
-/logs.md
 /logs.txt
 /.env
 /.env.*
 !/.env.example
+
+# syncthing transfer scratch
+.syncthing.*.tmp
+
+# local article bundle and figures, kept as a reference for the published port
+/article/

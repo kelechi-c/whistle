@@ -1,43 +1,35 @@
-"""Streaming Qwen3-TTS: yields codec chunks plus incremental decoded audio.
+"""Streaming Qwen3-TTS: yields codec chunks plus incrementally decoded audio.
 
-``stream_tts`` runs the V7 ``predictor-ffn-graphs`` decode loop but yields a
-chunk every ``chunk_size`` frames instead of collecting the whole utterance.
-Each chunk is decoded to audio incrementally with the official 25-frame left
-context (``decoder(codes[..., start-ctx:end])`` + context trim), so the first
-audio chunk is available long before the utterance finishes.
+``stream_tts`` runs the batch decode loop but yields every ``chunk_size`` frames
+instead of collecting the whole utterance. Each chunk is decoded with 25 frames
+of left context, so the first audio chunk lands long before the utterance ends.
+Chunk boundaries follow a ramp (``ramp_frames``) so the first frames ship early,
+and the first chunk optionally drops leading silence below an RMS threshold.
 
-Track A latency work: chunk boundaries follow a ramp schedule — the first
-``ramp_frames`` (default 2) frames ship immediately, subsequent chunks grow
-stepwise up to the steady-state ``chunk_size`` — cutting TTFA roughly by
-ramp[0] frames of decode time while later chunks keep playback headroom. The
-first chunk optionally drops leading silence below an RMS threshold (the
-nari-style dynamic trim; streaming audio already deviates bitwise from the
-official chunked(300, 25) decode at its own boundaries, so this only widens
-an existing, inaudible class of deviation). The transposed codec buffer is
-filled incrementally instead of re-copied per chunk.
-
-EOS handling matches ``inference.tts_infer``: no per-frame host sync. The
-chunked device scan runs at every ``EOS_CHECK_EVERY`` frames, at every chunk
-boundary (forced so a chunk never contains stale EOS frames), and at the final
-frame; the trim semantics are identical to the batch path.
+EOS uses the same chunked device scan as the batch path (forced at every chunk
+boundary), so no per-frame host sync is needed.
 
 Yields dicts::
 
     {"codes": [chunk, 16] int64, "audio": [1, samples] float32,
-     "sample_rate": int, "chunk_frames": int, "ttft_ms": float,
+     "sample_rate": int, "chunk_frames": int, "prefill_ms": float,
      "cumulative_ms": float, "chunk_ms": float, "final": bool}
 
-All tensors stay on-device; the caller transfers what it needs.
+``prefill_ms`` ends before any audio exists. ``cumulative_ms`` and ``chunk_ms``
+are host timestamps taken just after that chunk's codec decode is enqueued; the
+first chunk is additionally host-synchronized by the silence trim, so the first
+``cumulative_ms`` is a true audio-ready milestone and later ones are enqueue
+boundaries. Tensors stay on-device, so a consumer measures true first-audio
+latency after its own copy.
 """
 
 import time
 from typing import Any, Generator
 
-import click
 import torch
 from qwen_tts import Qwen3TTSModel
 
-from whistle.config import CHECKPOINT, LANGUAGE, SPEAKER
+from whistle.config import LANGUAGE, SPEAKER
 from whistle.inference import (
     _maybe_eos_row,
     _prefill,
@@ -63,6 +55,8 @@ def _trim_leading_silence(
     if audio.shape[-1] == 0:
         return audio
     window = max(1, sample_rate // 100)
+    if audio.shape[-1] < window:
+        return audio
     rms = audio.unfold(-1, window, window).pow(2).mean(-1).sqrt()
     loud = (rms > threshold).nonzero()
     if loud.numel() == 0:
@@ -124,10 +118,16 @@ def stream_tts(
     prompt = _prepare(
         tts, text, speaker=speaker, language=language, device=device, max_new_tokens=max_new_tokens
     )
-    first = _prefill(tts, prompt, repetition_penalty=repetition_penalty, stop_at_eos=stop_at_eos)
+    first = _prefill(
+        tts,
+        prompt,
+        repetition_penalty=repetition_penalty,
+        stop_at_eos=stop_at_eos,
+        sampling=sampling,
+    )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    ttft_ms = (time.perf_counter() - started) * 1000
+    prefill_ms = (time.perf_counter() - started) * 1000
 
     codes = torch.empty((max_new_tokens, first.num_code_groups), device=device, dtype=torch.long)
     codes_transposed = torch.empty(
@@ -149,19 +149,20 @@ def stream_tts(
     next_boundary = schedule.pop(0) if schedule else chunk_size
     emitted = 0
 
-    def chunk_dict(final: bool, now: float) -> Chunk:
-        """Assembles one yield, trims first-chunk silence, resets the cadence clock."""
+    def chunk_dict(final: bool) -> Chunk:
+        """Decodes the new frames, then records the audio-ready milestone."""
         nonlocal chunk_start_frame, chunk_started, emitted
         audio = decode_next(codes_transposed[..., :frame_count])
         if emitted == 0 and trim_leading_silence:
             audio = _trim_leading_silence(audio, sample_rate)
+        now = time.perf_counter()
         emitted += 1
         payload = {
             "codes": codes[chunk_start_frame:frame_count].clone(),
             "audio": audio,
             "sample_rate": sample_rate,
             "chunk_frames": frame_count - chunk_start_frame,
-            "ttft_ms": ttft_ms,
+            "prefill_ms": prefill_ms,
             "cumulative_ms": (now - started) * 1000,
             "chunk_ms": (now - chunk_started) * 1000,
             "final": final,
@@ -219,71 +220,9 @@ def stream_tts(
             codes_transposed[..., chunk_start_frame:frame_count].copy_(
                 codes[chunk_start_frame:frame_count].t().unsqueeze(0)
             )
-            now = time.perf_counter()
-            yield chunk_dict(is_last, now)
+            yield chunk_dict(is_last)
         if is_last:
             break
 
 
-@click.command()
-@click.argument("text")
-@click.option("--checkpoint", default=CHECKPOINT, show_default=True)
-@click.option("--speaker", default=SPEAKER, show_default=True)
-@click.option("--language", default=LANGUAGE, show_default=True)
-@click.option("--max-new-tokens", type=click.IntRange(min=2), default=1_280)
-@click.option("--chunk-size", type=click.IntRange(min=1), default=12, show_default=True)
-@click.option("--ramp", default="2,4,8", show_default=True, help="comma frame counts for the first chunks (empty string disables)")
-@click.option("--no-trim", is_flag=True, help="keep leading silence in the first chunk")
-@click.option("--left-context", type=click.IntRange(min=0), default=25, show_default=True)
-@click.option("--temperature", type=click.FloatRange(min=0.01), default=None, help="enable do_sample with this temperature")
-@click.option("--top-k", type=click.IntRange(min=1), default=50, show_default=True)
-def main(
-    text: str,
-    checkpoint: str,
-    speaker: str,
-    language: str,
-    max_new_tokens: int,
-    chunk_size: int,
-    ramp: str,
-    no_trim: bool,
-    left_context: int,
-    temperature: float | None,
-    top_k: int,
-) -> None:
-    """Streams TEXT and prints per-chunk latency milestones."""
-    ramp_frames = tuple(int(part) for part in ramp.split(",") if part.strip())
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tts = Qwen3TTSModel.from_pretrained(
-        checkpoint,
-        device_map=str(device),
-        dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
-        attn_implementation="sdpa",
-    )
-    list(
-        stream_tts(
-            tts, "warmup.", max_new_tokens=chunk_size + 2, chunk_size=chunk_size,
-            ramp_frames=ramp_frames, trim_leading_silence=not no_trim,
-            left_context=left_context, stop_at_eos=False,
-        )
-    )
-    torch.cuda.synchronize(device)
-    for index, chunk in enumerate(
-        stream_tts(tts, text, speaker=speaker, language=language,
-                   max_new_tokens=max_new_tokens, chunk_size=chunk_size,
-                   ramp_frames=ramp_frames, trim_leading_silence=not no_trim,
-                   left_context=left_context, temperature=temperature, top_k=top_k)
-    ):
-        audio_samples = chunk["audio"].shape[-1]
-        print(
-            f"chunk {index}: frames={chunk['chunk_frames']} "
-            f"cumulative={chunk['cumulative_ms']:.1f}ms "
-            f"chunk={chunk['chunk_ms']:.1f}ms audio={audio_samples} samples "
-            f"ttft={chunk['ttft_ms']:.1f}ms final={chunk['final']}"
-        )
-
-
 __all__ = ["stream_tts"]
-
-
-if __name__ == "__main__":
-    main()

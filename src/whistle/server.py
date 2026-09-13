@@ -27,6 +27,7 @@ from whistle.streaming import stream_tts
 
 app = FastAPI(title="whistle-tts", docs_url=None, redoc_url=None)
 _model: Qwen3TTSModel | None = None
+_device = "unset"
 _sample_rate = 24_000
 # Decoding mutates shared per-model state (rope deltas, graph input buffers),
 # so concurrent requests must not interleave; they queue here instead.
@@ -35,7 +36,7 @@ _generate_lock = threading.Lock()
 
 def get_model() -> Qwen3TTSModel:
     """Loads the official model once, lazily on the first request."""
-    global _model, _sample_rate
+    global _model, _device, _sample_rate
     if _model is None:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         _model = Qwen3TTSModel.from_pretrained(
@@ -44,7 +45,9 @@ def get_model() -> Qwen3TTSModel:
             dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             attn_implementation="sdpa",
         )
+        _device = device
         _sample_rate = int(_model.model.speech_tokenizer.model.get_output_sample_rate())
+        print(f"whistle server: model loaded on {_device}")
     return _model
 
 
@@ -75,8 +78,13 @@ def _wav_chunks(
 
 @app.get("/health")
 def health() -> dict[str, object]:
-    """Reports model load state."""
-    return {"status": "ok", "model_loaded": _model is not None, "sample_rate": _sample_rate}
+    """Reports model load state and the device it resolved to."""
+    return {
+        "status": "ok",
+        "model_loaded": _model is not None,
+        "device": _device,
+        "sample_rate": _sample_rate,
+    }
 
 
 @app.get("/synthesize")

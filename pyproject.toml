@@ -1,13 +1,15 @@
 [project]
 name = "whistle"
 version = "0.1.0"
-description = "Low-latency Qwen3 speech inference experiments"
+description = "Low-latency Qwen3-TTS inference via CUDA-graph replay"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.0",
-    "qwen-tts>=0.1",
+    "qwen-tts>=0.1,<0.2",
     "soundfile>=0.14.0",
+    "torch>=2.4",
+    "transformers>=4.57,<5",
 ]
 
 [project.scripts]
@@ -26,3 +28,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["whistle", "whistle.*"]
+
+[tool.ruff]
+line-length = 100

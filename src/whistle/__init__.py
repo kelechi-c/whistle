@@ -1,5 +1,3 @@
-"""Runtime configuration for the official Qwen3-TTS inference path."""
+from whistle.config import CHECKPOINT, LANGUAGE, MAX_CACHE_LEN, SPEAKER
 
-from whistle.config import RUNTIME, RuntimeConfig
-
-__all__ = ["RUNTIME", "RuntimeConfig"]
+__all__ = ["CHECKPOINT", "LANGUAGE", "MAX_CACHE_LEN", "SPEAKER"]
