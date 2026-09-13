@@ -17,7 +17,7 @@ __pycache__/
 /sandbox/
 /results/
 /out/
-/tools/
+/tools/make_figures.py
 /evidence/
 /project.md
 /logs.md

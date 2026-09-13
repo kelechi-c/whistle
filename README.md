@@ -75,18 +75,29 @@ uv sync --extra server
 uv run --no-sync python -m whistle.server --port 8000
 ```
 
-## Development
+## Benchmarks
 
 ```bash
 # structural tests: cpu, tiny random weights, no checkpoint needed
 uv run --no-sync python -m unittest discover -s tests -v
+
+# batch latency; --backend official runs the same measurement on qwen-tts
+PYTHONPATH=src uv run --no-sync python tools/profile_tts.py --text-file alicia.txt \
+    --backend split --iterations 5 --warmup 2 --json-out split.json
+
+# time to first CPU-ready audio
+PYTHONPATH=src uv run --no-sync python tools/bench_streaming.py --text-file alicia.txt
 ```
 
-The benchmark harnesses that produced `latency_report.md` (`profile_tts.py`,
-`bench_streaming.py`), the figure generator, the raw result records and the
-article bundle are local development material and are not part of this
-repository. The report keeps the run settings, medians, ranges and caveats for
-every table it states.
+`profile_tts.py --parity-dir DIR` also verifies exact codec-id and waveform
+parity. It needs two processes, because a 6 GB card cannot hold whistle and a
+pristine official model at once: run each backend with the same `--parity-dir`
+and the second one compares and exits non-zero on any difference. Compare at
+natural EOS, where both entrypoints truncate at the same frame; a cap-bound run
+is not directly comparable, because the official entrypoint reports one frame
+fewer for the same cap and the codec decoder's lookahead then changes the last
+frame's audio. `tools/run_promo_check.sh` runs the whole gate (tests, both
+parity checks, sampled capture, streaming spot) in one command.
 
 ## Layout
 
@@ -94,6 +105,7 @@ every table it states.
 | --- | --- |
 | `src/whistle/` | the runtime: config, CLI, graphs, batch inference, streaming, optional server |
 | `tests/` | CPU structural tests for the cache, graph, and token-loop contracts |
+| `tools/` | `profile_tts.py`, `bench_streaming.py`, and the release gate |
 | `assets/` | the chart shown above |
 | `alicia.txt` | the long-form benchmark input every quoted number uses |
 | `latency_report.md` | consolidated measurements and their caveats |
