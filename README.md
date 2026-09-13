@@ -22,9 +22,9 @@ That is **34.8% less wall time**. Codec ids and waveform are bit-identical to th
 official runtime in this configuration (natural EOS, all 1,216 frames, compared
 against a pristine official model in a separate process). Full tables, per-GPU
 results, the streaming numbers, and every measurement caveat are in
-[`latency_report.md`](latency_report.md), with the raw records in `evidence/`.
-The written article and its full figure set are published separately (Sciel) and
-kept out of this repository.
+[`latency_report.md`](latency_report.md). The written article and its full figure
+set are published separately (Sciel) and kept out of this repository, together
+with the benchmark harnesses and the raw records they produced.
 
 ## Requirements
 
@@ -75,35 +75,18 @@ uv sync --extra server
 uv run --no-sync python -m whistle.server --port 8000
 ```
 
-## Reproducing the results
-
-Everything below runs on the GPU box. `alicia.txt` is the benchmark text; both
-benchmarks stop at natural EOS unless told otherwise.
+## Development
 
 ```bash
-# structural tests (no checkpoint needed)
+# structural tests: cpu, tiny random weights, no checkpoint needed
 uv run --no-sync python -m unittest discover -s tests -v
-
-# batch latency + exact parity: two processes, because one 6 GB card
-# cannot hold the whistle model and a pristine official model at once
-PYTHONPATH=src uv run --no-sync python tools/profile_tts.py --text-file alicia.txt \
-    --backend split --iterations 5 --warmup 2 --parity-dir /tmp/whistle-parity
-PYTHONPATH=src uv run --no-sync python tools/profile_tts.py --text-file alicia.txt \
-    --backend official --iterations 5 --warmup 2 --parity-dir /tmp/whistle-parity
-
-# time to first CPU-ready audio
-PYTHONPATH=src uv run --no-sync python tools/bench_streaming.py --text-file alicia.txt
-
-# regenerate the article figures (SF Pro must be installed locally; pass --font-dir)
-uv run --no-project --with matplotlib python tools/make_figures.py
 ```
 
-The parity comparison is exact and the second run exits non-zero on any
-difference, including a frame-count difference. Both entrypoints truncate at the
-same frame at natural EOS, which is what the recipe above uses. A run that stops
-at its frame cap is not directly comparable: the official entrypoint reports one
-frame fewer for the same cap (and the codec decoder's lookahead then changes the
-last frame's audio), so align the caps when you need a cap-bound comparison.
+The benchmark harnesses that produced `latency_report.md` (`profile_tts.py`,
+`bench_streaming.py`), the figure generator, the raw result records and the
+article bundle are local development material and are not part of this
+repository. The report keeps the run settings, medians, ranges and caveats for
+every table it states.
 
 ## Layout
 
@@ -111,6 +94,6 @@ last frame's audio), so align the caps when you need a cap-bound comparison.
 | --- | --- |
 | `src/whistle/` | the runtime: config, CLI, graphs, batch inference, streaming, optional server |
 | `tests/` | CPU structural tests for the cache, graph, and token-loop contracts |
-| `tools/` | benchmark harnesses, the release gate, and the figure generator |
-| `evidence/` | compact benchmark records behind `latency_report.md` and the figures |
+| `assets/` | the chart shown above |
+| `alicia.txt` | the long-form benchmark input every quoted number uses |
 | `latency_report.md` | consolidated measurements and their caveats |

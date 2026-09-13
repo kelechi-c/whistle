@@ -1,6 +1,6 @@
 # Whistle latency report
 
-Reviewed 2026-09-13. Models are **0.6B and 1.7B** (there is no 0.7B checkpoint in this campaign). This report consolidates the saved RTX 3050, RTX PRO 6000, and Modal measurements cited below. Raw records live in `evidence/`; the write-up and its figures live outside this repo, and older ad-hoc run directories were archived out of the released tree.
+Reviewed 2026-09-13. Models are **0.6B and 1.7B** (there is no 0.7B checkpoint in this campaign). This report consolidates the saved RTX 3050, RTX PRO 6000, and Modal measurements cited below. The run settings, medians, ranges and caveats for every table are stated here; the raw record files and the write-up are kept alongside the project locally and are not part of the repository.
 
 ## Release validation: RTX 3050 Laptop, 6 GB (2026-09-13, mains power)
 
@@ -65,7 +65,7 @@ diagnostic, while its complete predictor sequence is slightly longer. This
 supports the idea that its larger talker graph can win on the PRO 6000. It
 does not explain the Victoria reversal by itself: the modular check was only
 run on Modal, and the two packages use different cache, attention, and
-predictor policies. Raw checks are `evidence/modular_whistle_0.6B.json`,
+predictor policies. Raw checks are the `modular_whistle_0.6B.json` records,
 `modular_whistle_1.7B.json`, `modular_faster_0.6B.json`, and
 `modular_faster_1.7B.json`.
 
@@ -89,10 +89,9 @@ opposite of the isolated PRO 6000 modular result, where the faster talker
 graph was 5.10/6.66 ms per call versus Whistle's 9.97/9.96 ms. The crossover
 is consistent with fixed-cache attention and eager-versus-graph boundaries
 interacting differently with GPU memory bandwidth and launch cost, but these
-traces do not isolate a single causal factor. Raw checks are
-`evidence/victoria_modular_whistle_0.6B.json`,
-`victoria_modular_whistle_1.7B.json`, `victoria_modular_faster_0.6B.json`, and
-`victoria_modular_faster_1.7B.json`.
+traces do not isolate a single causal factor. Raw checks are the
+`victoria_modular_whistle_{0.6B,1.7B}.json` and
+`victoria_modular_faster_{0.6B,1.7B}.json` records.
 
 ## What the review changes
 
@@ -143,7 +142,7 @@ The 0.1 ms `codec_drain` is host enqueue duration around an asynchronous wait, n
 
 ## Evidence index
 
-3050 raw files (all under `evidence/`):
+3050 records (each a saved bench JSON, kept locally):
 - `official_current_p50_5runs.json`
 - `v7_current_p50_5runs.json`
 - `official_1.7b_3runs.json`
@@ -159,4 +158,4 @@ The RTX PRO 6000 rows come from Modal runs whose raw directories are no longer
 part of the released tree — they were archived during the pre-release cleanup —
 so those numbers are cited from this report only. Treat them as
 entrypoint-level comparisons rather than independently reproducible artifacts.
-Every RTX 3050 number resolves to a record in `evidence/`.
+Every RTX 3050 number above comes from one of those saved records.

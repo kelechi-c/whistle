@@ -10,13 +10,16 @@ __pycache__/
 /dist/
 /wheels/
 
-# local scratch that is not part of the release
+# local scratch, harnesses and records: kept on disk, never committed
 /local/
 /refs/
 /stash/
 /sandbox/
 /results/
 /out/
+/tools/
+/evidence/
+/project.md
 /logs.md
 
 # machine state, credentials, and agent records
