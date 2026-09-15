@@ -3,6 +3,8 @@ name = "whistle"
 version = "0.1.0"
 description = "Low-latency Qwen3-TTS inference via CUDA-graph replay"
 readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Kelechi Chibuzo", email = "kelechichibuzo7@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.0",
@@ -11,6 +13,11 @@ dependencies = [
     "torch>=2.4",
     "transformers>=4.57,<5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kelechi-c/whistle"
+Repository = "https://github.com/kelechi-c/whistle"
+Article = "https://kelechi.cc/articles/whistle-qwen3-tts"
 
 [project.scripts]
 whistle = "whistle.cli:main"
@@ -21,6 +28,12 @@ server = [
     "uvicorn>=0.30",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
@@ -28,6 +41,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["whistle", "whistle.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100

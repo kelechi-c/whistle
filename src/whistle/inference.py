@@ -5,17 +5,19 @@ fixed-shape decode blocks to ``graphs.py``. Official modules and weights remain
 unchanged while decode state and completed outputs stay on-device.
 """
 
-from dataclasses import dataclass
 import time
+from dataclasses import dataclass
+
 import torch
 from qwen_tts import Qwen3TTSModel
-from whistle.config import MAX_CACHE_LEN
-from whistle.graphs import DecodeGraphs, decode_graphs, sample_token
 from transformers.generation.logits_process import (
     LogitsProcessorList,
     RepetitionPenaltyLogitsProcessor,
     SuppressTokensLogitsProcessor,
 )
+
+from whistle.config import MAX_CACHE_LEN
+from whistle.graphs import DecodeGraphs, decode_graphs, sample_token
 
 EOS_CHECK_EVERY = 8
 

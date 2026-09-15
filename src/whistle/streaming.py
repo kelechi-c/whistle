@@ -24,7 +24,8 @@ latency after its own copy.
 """
 
 import time
-from typing import Any, Generator
+from collections.abc import Generator
+from typing import Any
 
 import torch
 from qwen_tts import Qwen3TTSModel

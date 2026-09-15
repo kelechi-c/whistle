@@ -248,9 +248,8 @@ class DecoderFfnGraph(torch.nn.Module):
         torch.cuda.current_stream(self.inputs.device).wait_stream(stream)
         torch.cuda.synchronize(self.inputs.device)
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.stream(stream):
-            with torch.cuda.graph(self.graph, pool=pool):
-                self.output.copy_(self._ffn(self.inputs))
+        with torch.cuda.stream(stream), torch.cuda.graph(self.graph, pool=pool):
+            self.output.copy_(self._ffn(self.inputs))
         torch.cuda.current_stream(self.inputs.device).wait_stream(stream)
 
     def forward(self, hidden_states: torch.Tensor, **kwargs: Any) -> tuple[Any, ...]:

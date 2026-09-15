@@ -164,9 +164,8 @@ class InferenceTest(unittest.TestCase):
 
     def test_capacity_and_budget_are_validated(self) -> None:
         """Oversized prompts and non-positive frame budgets raise before decoding."""
-        with patch("whistle.inference.MAX_CACHE_LEN", 8):
-            with self.assertRaises(ValueError):
-                tts_infer(self.tts, "hi", max_new_tokens=2, stop_at_eos=False)
+        with patch("whistle.inference.MAX_CACHE_LEN", 8), self.assertRaises(ValueError):
+            tts_infer(self.tts, "hi", max_new_tokens=2, stop_at_eos=False)
         with self.assertRaises(ValueError):
             tts_infer(self.tts, "hi", max_new_tokens=0, stop_at_eos=False)
         with self.assertRaises(ValueError):

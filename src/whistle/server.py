@@ -13,7 +13,7 @@ Test:
 
 import struct
 import threading
-from typing import Generator
+from collections.abc import Generator
 
 import click
 import torch
