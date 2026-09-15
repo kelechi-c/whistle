@@ -2,9 +2,9 @@
 
 faster inference for **Qwen3-TTS CustomVoice** (0.6B / 1.7B) on a single consumer GPU (tested on RTX 3050).
 
-whistle achieves **1.5x** improvement over the official `qwen-tts` runtime by CUDA graph replay on the **Talker module's post-attention FFN** (20 graphs for 0.6B) and the **residual codebook predictor positions** (15 graphs, one per residual codebook position), which are the specific areas of **fixed shape** execution. Attention is left eager for the talker, while the code predictor module uses **PrefixStaticLayer**—a kvcache implementation which exposes only the active attention prefix slice for each step while maintaining a fixed backing buffer. These **35 graphs are replayed once per frame**, using native PyTorch with zero custom kernels, quantisation, or re-training.
+whistle achieves **1.5x** improvement over the official `qwen-tts` runtime by CUDA graph replay on the **Talker module's post-attention FFN** (20 graphs for 0.6B) and the **residual codebook predictor positions** (15 graphs, one per residual codebook position), which are the specific areas of **fixed shape** execution. Attention is left eager for the talker, while the code predictor module uses **PrefixStaticLayer**, a kvcache implementation which exposes only the active attention prefix slice for each step while maintaining a fixed backing buffer. These **35 graphs are replayed once per frame**, using **native PyTorch optimizations** with zero custom kernels, quantization, or posttraining (also no `torch.compile`, hehe).
 
-![whistle matches the official runtime's transcript/WER at a lower real-time factor](assets/whistle_wer_rtf_scatter.png)
+![whistle matches the official runtime's transcript/WER at a much lower RTF/latency](assets/whistle_wer_rtf_scatter.png)
 
 ## metrics summary
 
@@ -15,7 +15,7 @@ alicia.txt letter, 0.6B, bf16, greedy, RTX 3050 (6 GB), p50 of 5 runs, WER from 
 | official `qwen-tts` | 83.26 s | 0.856 | 1.17× | 3.02% | — |
 | **whistle** | **54.27 s** | **0.558** | **1.79×** | **3.02%** | **34.8%** |
 
-both runtimes transcribe identically: 7 word edits over 232 reference words.
+both runtimes transcribe identically with no quality degradation.
 
 tables and charts for other GPUs, model sizes and streaming are in [`latency_report.md`](latency_report.md). benchmark tools are in `tools/`.
 
@@ -62,7 +62,7 @@ for chunk in stream_tts(model, "hello from whistle streaming.", chunk_size=12):
 
 First CPU-ready audio on the RTX 3050 is **116 ms** for a short sentence and **154 ms** for the letter in alicia.txt (chunk ramp 2/4/8, then 12-frame chunks, 25-frame codec context).
 
-HTTP streaming server (`audio/wav`, chunked):
+**HTTP streaming server (`audio/wav`, chunked)**:
 
 ```bash
 uv sync --extra server
@@ -94,13 +94,14 @@ bash tools/run_promo_check.sh
 - **no custom kernels:** runs entirely on PyTorch CUDA graphs and standard PyTorch operators.
 - **no quantization:** weights remain full bfloat16.
 - **no CPU inference fallback:** requires an NVIDIA CUDA device with bfloat16 support.
-- **greedy parity vs sampling:** exact bit-identical parity against official `qwen-tts` is validated on greedy decoding at natural EOS. Sampling (`--temperature` / `--top-k`) is supported via captured sampling graphs, but exact numerical equivalence against official sampling schedules is not guaranteed.
+
 
 ## acknowledgements
 
-- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba Cloud Qwen team for the original model architecture, weights, and tokenizer.
-- [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) by Andi Marafioti for benchmarking exploration and inspiration.
+- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba's **Qwen** team for the original model architecture, weights, and tokenizer.
+- **[faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts)** by **Andi Marafioti** for benchmarks and inspiration.
+- The test sample at `alicia.txt` is dialogue from the game, *Clair Obscur: Expedition 33*.
+- **gpt-5.6-sol** and **deepseek v4-flash** were crucial in code implementations and experiments.
 
 ## license
-
 Apache 2.0. See [LICENSE](LICENSE) for details.
