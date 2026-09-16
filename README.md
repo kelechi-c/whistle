@@ -2,7 +2,7 @@
 
 faster inference for **Qwen3-TTS CustomVoice** (0.6B / 1.7B) on a single consumer GPU (tested on RTX 3050).
 
-whistle achieves **1.5x** improvement over the official `qwen-tts` runtime by CUDA graph replay on the **Talker module's post-attention FFN** (20 graphs for 0.6B) and the **residual codebook predictor positions** (15 graphs, one per residual codebook position), which are the specific areas of **fixed shape** execution. Attention is left eager for the talker, while the code predictor module uses **PrefixStaticLayer**, a kvcache implementation which exposes only the active attention prefix slice for each step while maintaining a fixed backing buffer. These **35 graphs are replayed once per frame**, using **native PyTorch optimizations** with zero custom kernels, quantization, or posttraining (also no `torch.compile`, hehe).
+whistle achieves **1.5x** improvement over the official `qwen-tts` runtime by CUDA graph replay on the **Talker module's post-attention FFN** (20 graphs for 0.6B) and the **residual codebook predictor positions** (15 graphs, one per residual codebook position), which are the specific areas of **fixed shape** execution. Attention is left eager for the talker, while the code predictor module uses **PrefixStaticLayer**, a kvcache implementation which exposes only the active attention prefix slice for each step while maintaining a fixed backing buffer. These **35 graphs are replayed once per frame**, using **native PyTorch optimizations** with **zero custom kernels, quantization, or posttraining** (also no literal `torch.compile`, haha).
 
 ![whistle matches the official runtime's transcript/WER at a much lower RTF/latency](assets/whistle_wer_rtf_scatter.png)
 
@@ -23,9 +23,8 @@ tables and charts for other GPUs, model sizes and streaming are in [`latency_rep
 
 ## requirements
 
-- an nvidia GPU: CUDA only, there is no CPU inference path. 0.6B peaks at ~3 GB VRAM, 1.7B at ~5 GB.
-- bf16 is hardcoded, so Ampere or newer runs it natively (developed on an RTX 3050 Laptop, 6 GB).
-- Python 3.12+ and PyTorch 2.4+ (`uv sync` installs both).
+- an Nvidia GPU: CUDA only, there is no CPU inference path (0.6B peaks at ~3 GB VRAM, 1.7B at ~5 GB)
+- Python 3.12+ and PyTorch 2.4+ (`uv sync` installs both anyways).
 - disk: ~2.4 GB (0.6B weights) or ~4.3 GB (1.7B weights), downloaded from Hugging Face on first run.
 
 ## install
@@ -37,7 +36,7 @@ cd whistle && uv sync
 
 ## usage
 
-Synthesize one clip (this downloads weights on first run):
+synthesize one clip:
 
 ```bash
 uv run whistle "your life is your canvas, what will you paint?" --out hello.wav
@@ -60,7 +59,7 @@ for chunk in stream_tts(model, "hello from whistle streaming.", chunk_size=12):
         break
 ```
 
-First CPU-ready audio on the RTX 3050 is **116 ms** for a short sentence and **154 ms** for the letter in alicia.txt (chunk ramp 2/4/8, then 12-frame chunks, 25-frame codec context).
+first CPU-ready audio on the RTX 3050 is **116 ms** (for short samples/sentences) and **154 ms** (for longer text, like the letter in alicia.txt). uses chunk ramp-up of 2/4/8, then 12-frame chunks, with 25-frame codec context/prefix.
 
 **HTTP streaming server (`audio/wav`, chunked)**:
 
@@ -69,36 +68,18 @@ uv sync --extra server
 uv run python -m whistle.server --port 8000
 ```
 
-## testing
+## a little backstory
+this is really my first shot at inference engineering/optimizations. I picked this (qwen3-tts) cus I thought it'd be useful locally AND the architecture was interesting/unconventional. 
+I am glad I finished this one(since I tend to jump around projects a lot), and even wrote a technical article on it(first proper one I have ever written tbh). 
 
-Run CPU structural tests (runs in <1s, no checkpoint or GPU required):
+next steps will be optimizing other audio models, local inference engines, or wait, I should scale up(bigger models/GPUs, TPUs maybe?)...would be more useful in the industry/future.
+but still, if I see a small sized model, that fits on the 3050, I will try and perform different surgeries to make it faster than it is already. my current focus is audio models(STT, TTS, music, etc).
 
-```bash
-uv run python -m unittest discover -s tests -v
-```
-
-Lint with ruff:
-
-```bash
-uv run ruff check src tests
-```
-
-Run the GPU release gate (structural tests, natural EOS parity, streaming, and sampled capture):
-
-```bash
-bash tools/run_promo_check.sh
-```
-
-## what whistle does not do
-
-- **no custom kernels:** runs entirely on PyTorch CUDA graphs and standard PyTorch operators.
-- **no quantization:** weights remain full bfloat16.
-- **no CPU inference fallback:** requires an NVIDIA CUDA device with bfloat16 support.
-
+Thankfully, current generation LLMs make work and learning much more rapid. 
 
 ## acknowledgements
 
-- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba's **Qwen** team for the original model architecture, weights, and tokenizer.
+- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba's **Qwen** team for the original model architecture/weights/research.
 - **[faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts)** by **Andi Marafioti** for benchmarks and inspiration.
 - The test sample at `alicia.txt` is dialogue from the game, *Clair Obscur: Expedition 33*.
 - **gpt-5.6-sol** and **deepseek v4-flash** were crucial in code implementations and experiments.
